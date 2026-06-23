@@ -191,6 +191,87 @@ class Database:
         ON git_commits(module);
     """
 
+    # -- Super Tutor 专用表 -------------------------------------------------
+
+    _DDL_KNOWLEDGE_CHUNKS = """
+    CREATE TABLE IF NOT EXISTS knowledge_chunks (
+        chunk_id     TEXT PRIMARY KEY,
+        material_id  TEXT    NOT NULL,
+        content      TEXT    NOT NULL,
+        summary      TEXT    NOT NULL DEFAULT '',
+        topic        TEXT    NOT NULL DEFAULT '',
+        difficulty   TEXT    NOT NULL DEFAULT 'medium',
+        keywords     TEXT    NOT NULL DEFAULT '[]',
+        page_start   INTEGER,
+        page_end     INTEGER,
+        embedding    BLOB,
+        metadata     TEXT    NOT NULL DEFAULT '{}',
+        created_at   TEXT    NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunks_material_id
+        ON knowledge_chunks(material_id);
+    CREATE INDEX IF NOT EXISTS idx_chunks_topic
+        ON knowledge_chunks(topic);
+    CREATE INDEX IF NOT EXISTS idx_chunks_difficulty
+        ON knowledge_chunks(difficulty);
+    """
+
+    _DDL_QUESTIONS = """
+    CREATE TABLE IF NOT EXISTS questions (
+        question_id        TEXT PRIMARY KEY,
+        session_id         TEXT,
+        type               TEXT    NOT NULL,
+        difficulty         TEXT    NOT NULL DEFAULT 'medium',
+        subject            TEXT    NOT NULL DEFAULT '',
+        topic              TEXT    NOT NULL DEFAULT '',
+        stem               TEXT    NOT NULL,
+        options            TEXT    NOT NULL DEFAULT '[]',
+        correct_answer     TEXT    NOT NULL,
+        explanation        TEXT    NOT NULL DEFAULT '',
+        chunk_ids          TEXT    NOT NULL DEFAULT '[]',
+        knowledge_node_ids TEXT    NOT NULL DEFAULT '[]',
+        estimated_seconds  INTEGER NOT NULL DEFAULT 120,
+        points             REAL    NOT NULL DEFAULT 1.0,
+        tags               TEXT    NOT NULL DEFAULT '[]',
+        metadata           TEXT    NOT NULL DEFAULT '{}',
+        created_at         TEXT    NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_questions_session_id
+        ON questions(session_id);
+    CREATE INDEX IF NOT EXISTS idx_questions_topic
+        ON questions(topic);
+    CREATE INDEX IF NOT EXISTS idx_questions_difficulty
+        ON questions(difficulty);
+    CREATE INDEX IF NOT EXISTS idx_questions_type
+        ON questions(type);
+    """
+
+    _DDL_QUIZ_ATTEMPTS = """
+    CREATE TABLE IF NOT EXISTS quiz_attempts (
+        attempt_id        TEXT PRIMARY KEY,
+        session_id        TEXT    NOT NULL,
+        question_id       TEXT    NOT NULL,
+        student_answer    TEXT,
+        is_correct        INTEGER,
+        score             REAL,
+        time_spent_seconds INTEGER NOT NULL DEFAULT 0,
+        hints_used        INTEGER NOT NULL DEFAULT 0,
+        attempt_number    INTEGER NOT NULL DEFAULT 1,
+        confidence        REAL,
+        misconception_ids TEXT    NOT NULL DEFAULT '[]',
+        note              TEXT    NOT NULL DEFAULT '',
+        started_at        TEXT    NOT NULL,
+        submitted_at      TEXT,
+        metadata          TEXT    NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_attempts_session_id
+        ON quiz_attempts(session_id);
+    CREATE INDEX IF NOT EXISTS idx_attempts_question_id
+        ON quiz_attempts(question_id);
+    CREATE INDEX IF NOT EXISTS idx_attempts_is_correct
+        ON quiz_attempts(is_correct);
+    """
+
     # ------------------------------------------------------------------
 
     def __init__(
@@ -311,6 +392,9 @@ class Database:
             self._DDL_TASK_LOG,
             self._DDL_TOKEN_USAGE,
             self._DDL_GIT_COMMITS,
+            self._DDL_KNOWLEDGE_CHUNKS,
+            self._DDL_QUESTIONS,
+            self._DDL_QUIZ_ATTEMPTS,
         ]
         for ddl in ddl_statements:
             await self._conn.executescript(ddl)
@@ -994,3 +1078,315 @@ class Database:
                 except (json.JSONDecodeError, TypeError):
                     pass
         return results
+
+    # ==================================================================
+    # Knowledge Chunk CRUD
+    # ==================================================================
+
+    async def insert_chunk(self, chunk: dict[str, Any]) -> str:
+        """Insert a knowledge chunk and optionally generate its embedding.
+
+        Args:
+            chunk: Dict with keys matching ``KnowledgeChunk`` model fields.
+                Required: ``chunk_id``, ``material_id``, ``content``,
+                ``created_at``.
+
+        Returns:
+            The ``chunk_id`` of the inserted row.
+        """
+        assert self._conn is not None
+        keywords = chunk.get("keywords", [])
+        if isinstance(keywords, list):
+            keywords = json.dumps(keywords)
+        metadata = chunk.get("metadata", {})
+        if isinstance(metadata, dict):
+            metadata = json.dumps(metadata)
+
+        # Generate embedding from summary (or content as fallback).
+        embedding_blob: Optional[bytes] = None
+        text_to_embed = chunk.get("summary") or chunk.get("content", "")
+        if text_to_embed and _HAS_OPENAI:
+            try:
+                embedding = await self._generate_embedding(text_to_embed)
+                embedding_blob = self._embedding_to_blob(embedding)
+            except Exception as exc:
+                logger.warning("Failed to generate embedding for chunk: %s", exc)
+
+        await self._conn.execute(
+            """INSERT INTO knowledge_chunks
+               (chunk_id, material_id, content, summary, topic, difficulty,
+                keywords, page_start, page_end, embedding, metadata, created_at)
+               VALUES
+               (:chunk_id, :material_id, :content, :summary, :topic, :difficulty,
+                :keywords, :page_start, :page_end, :embedding, :metadata, :created_at)""",
+            {
+                "chunk_id": chunk["chunk_id"],
+                "material_id": chunk["material_id"],
+                "content": chunk["content"],
+                "summary": chunk.get("summary", ""),
+                "topic": chunk.get("topic", ""),
+                "difficulty": chunk.get("difficulty", "medium"),
+                "keywords": keywords,
+                "page_start": chunk.get("page_start"),
+                "page_end": chunk.get("page_end"),
+                "embedding": embedding_blob,
+                "metadata": metadata,
+                "created_at": chunk["created_at"],
+            },
+        )
+        await self._conn.commit()
+        return chunk["chunk_id"]
+
+    async def get_chunk(self, chunk_id: str) -> Optional[dict[str, Any]]:
+        """Retrieve a single knowledge chunk by ID."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT * FROM knowledge_chunks WHERE chunk_id = ?", (chunk_id,)
+        )
+        row = await cursor.fetchone()
+        return self._row_to_dict(row) if row else None
+
+    async def list_chunks_by_material(
+        self, material_id: str
+    ) -> list[dict[str, Any]]:
+        """List all chunks belonging to a material, ordered by page."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """SELECT * FROM knowledge_chunks
+               WHERE material_id = ?
+               ORDER BY page_start ASC, created_at ASC""",
+            (material_id,),
+        )
+        rows = await cursor.fetchall()
+        return self._rows_to_dicts(rows)
+
+    async def search_chunks_by_topic(
+        self, topic: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Find chunks matching a topic tag (substring match)."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """SELECT * FROM knowledge_chunks
+               WHERE topic LIKE ?
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (f"%{topic}%", limit),
+        )
+        rows = await cursor.fetchall()
+        return self._rows_to_dicts(rows)
+
+    # ==================================================================
+    # Question CRUD
+    # ==================================================================
+
+    async def insert_question(self, question: dict[str, Any]) -> str:
+        """Insert a quiz question.
+
+        Args:
+            question: Dict with keys matching ``Question`` model fields.
+                Required: ``question_id``, ``type``, ``stem``,
+                ``correct_answer``, ``created_at``.
+
+        Returns:
+            The ``question_id`` of the inserted row.
+        """
+        assert self._conn is not None
+
+        def _json_field(value: Any) -> str:
+            """Serialize list/dict fields to JSON string for SQLite storage."""
+            if isinstance(value, (list, dict)):
+                return json.dumps(value, ensure_ascii=False)
+            return str(value) if value else "[]"
+
+        await self._conn.execute(
+            """INSERT INTO questions
+               (question_id, session_id, type, difficulty, subject, topic,
+                stem, options, correct_answer, explanation, chunk_ids,
+                knowledge_node_ids, estimated_seconds, points, tags, metadata,
+                created_at)
+               VALUES
+               (:question_id, :session_id, :type, :difficulty, :subject, :topic,
+                :stem, :options, :correct_answer, :explanation, :chunk_ids,
+                :knowledge_node_ids, :estimated_seconds, :points, :tags, :metadata,
+                :created_at)""",
+            {
+                "question_id": question["question_id"],
+                "session_id": question.get("session_id"),
+                "type": question["type"],
+                "difficulty": question.get("difficulty", "medium"),
+                "subject": question.get("subject", ""),
+                "topic": question.get("topic", ""),
+                "stem": question["stem"],
+                "options": _json_field(question.get("options", [])),
+                "correct_answer": _json_field(question["correct_answer"]),
+                "explanation": question.get("explanation", ""),
+                "chunk_ids": _json_field(question.get("chunk_ids", [])),
+                "knowledge_node_ids": _json_field(
+                    question.get("knowledge_node_ids", [])
+                ),
+                "estimated_seconds": question.get("estimated_seconds", 120),
+                "points": question.get("points", 1.0),
+                "tags": _json_field(question.get("tags", [])),
+                "metadata": _json_field(question.get("metadata", {})),
+                "created_at": question["created_at"],
+            },
+        )
+        await self._conn.commit()
+        return question["question_id"]
+
+    async def get_question(self, question_id: str) -> Optional[dict[str, Any]]:
+        """Retrieve a single question by ID."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT * FROM questions WHERE question_id = ?", (question_id,)
+        )
+        row = await cursor.fetchone()
+        return self._row_to_dict(row) if row else None
+
+    async def list_questions_by_session(
+        self, session_id: str
+    ) -> list[dict[str, Any]]:
+        """List all questions belonging to a quiz session."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """SELECT * FROM questions
+               WHERE session_id = ?
+               ORDER BY created_at ASC""",
+            (session_id,),
+        )
+        rows = await cursor.fetchall()
+        return self._rows_to_dicts(rows)
+
+    # ==================================================================
+    # Quiz Attempt CRUD
+    # ==================================================================
+
+    async def insert_attempt(self, attempt: dict[str, Any]) -> str:
+        """Insert a quiz attempt record.
+
+        Args:
+            attempt: Dict with keys matching ``QuizAttempt`` model fields.
+                Required: ``attempt_id``, ``session_id``, ``question_id``,
+                ``started_at``.
+
+        Returns:
+            The ``attempt_id`` of the inserted row.
+        """
+        assert self._conn is not None
+
+        def _json_field(value: Any) -> str:
+            if isinstance(value, (list, dict)):
+                return json.dumps(value, ensure_ascii=False)
+            return str(value) if value else "[]"
+
+        student_answer = attempt.get("student_answer")
+        if isinstance(student_answer, (dict, list)):
+            student_answer = json.dumps(student_answer, ensure_ascii=False)
+        elif student_answer is not None:
+            student_answer = str(student_answer)
+
+        await self._conn.execute(
+            """INSERT INTO quiz_attempts
+               (attempt_id, session_id, question_id, student_answer, is_correct,
+                score, time_spent_seconds, hints_used, attempt_number, confidence,
+                misconception_ids, note, started_at, submitted_at, metadata)
+               VALUES
+               (:attempt_id, :session_id, :question_id, :student_answer, :is_correct,
+                :score, :time_spent_seconds, :hints_used, :attempt_number, :confidence,
+                :misconception_ids, :note, :started_at, :submitted_at, :metadata)""",
+            {
+                "attempt_id": attempt["attempt_id"],
+                "session_id": attempt["session_id"],
+                "question_id": attempt["question_id"],
+                "student_answer": student_answer,
+                "is_correct": (
+                    1 if attempt.get("is_correct")
+                    else (0 if attempt.get("is_correct") is False else None)
+                ),
+                "score": attempt.get("score"),
+                "time_spent_seconds": attempt.get("time_spent_seconds", 0),
+                "hints_used": attempt.get("hints_used", 0),
+                "attempt_number": attempt.get("attempt_number", 1),
+                "confidence": attempt.get("confidence"),
+                "misconception_ids": _json_field(
+                    attempt.get("misconception_ids", [])
+                ),
+                "note": attempt.get("note", ""),
+                "started_at": attempt["started_at"],
+                "submitted_at": attempt.get("submitted_at"),
+                "metadata": _json_field(attempt.get("metadata", {})),
+            },
+        )
+        await self._conn.commit()
+        return attempt["attempt_id"]
+
+    async def get_attempt(self, attempt_id: str) -> Optional[dict[str, Any]]:
+        """Retrieve a single attempt by ID."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT * FROM quiz_attempts WHERE attempt_id = ?", (attempt_id,)
+        )
+        row = await cursor.fetchone()
+        return self._row_to_dict(row) if row else None
+
+    async def list_attempts_by_session(
+        self, session_id: str
+    ) -> list[dict[str, Any]]:
+        """List all attempts in a quiz session."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """SELECT * FROM quiz_attempts
+               WHERE session_id = ?
+               ORDER BY started_at ASC""",
+            (session_id,),
+        )
+        rows = await cursor.fetchall()
+        return self._rows_to_dicts(rows)
+
+    async def update_attempt_grading(
+        self,
+        attempt_id: str,
+        is_correct: bool,
+        score: float,
+        misconception_ids: Optional[list[str]] = None,
+    ) -> None:
+        """Update an attempt with grading results after evaluation.
+
+        Args:
+            attempt_id: The attempt to update.
+            is_correct: Whether the answer was correct.
+            score: The awarded score.
+            misconception_ids: Optional list of misconception tag IDs.
+        """
+        assert self._conn is not None
+        mis_ids = (
+            json.dumps(misconception_ids, ensure_ascii=False)
+            if misconception_ids
+            else "[]"
+        )
+        await self._conn.execute(
+            """UPDATE quiz_attempts
+               SET is_correct = ?, score = ?, misconception_ids = ?
+               WHERE attempt_id = ?""",
+            (1 if is_correct else 0, score, mis_ids, attempt_id),
+        )
+        await self._conn.commit()
+
+    async def count_wrong_attempts_by_knowledge_node(
+        self, knowledge_node_id: str
+    ) -> int:
+        """Count wrong attempts related to a specific knowledge node.
+
+        This queries through the questions table to find attempts on questions
+        that reference the given knowledge node.
+        """
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """SELECT COUNT(*) as cnt FROM quiz_attempts qa
+               JOIN questions q ON qa.question_id = q.question_id
+               WHERE qa.is_correct = 0
+                 AND q.knowledge_node_ids LIKE ?""",
+            (f"%{knowledge_node_id}%",),
+        )
+        row = await cursor.fetchone()
+        return row["cnt"] if row else 0
