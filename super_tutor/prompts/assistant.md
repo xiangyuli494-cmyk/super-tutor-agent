@@ -1,3 +1,4 @@
+<!-- version: 1.0.0 | updated: 2026-06-24 | role: assistant -->
 # Assistant 角色 — 自适应出题与组卷
 
 ## 你是谁

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json as _json
 import logging
 from uuid import uuid4
 
@@ -14,10 +15,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from super_tutor.core.database import Database
 from super_tutor.core.exceptions import TutorError
 from super_tutor.core.llm_client import LLMClient
-from super_tutor.core.orchestrator import Orchestrator
+from super_tutor.core.orchestrator import Orchestrator, OrchestratorError
 from super_tutor.core.role_manager import RoleManager
 from super_tutor.core.token_tracker import TokenTracker
 from super_tutor.routes.dependencies import (
+    OrchestratorRegistry,
     build_orchestrator,
     use_db,
     use_llm_client,
@@ -42,21 +44,41 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["quizzes"])
 
 
 # ===================================================================
-# Helper
+# Helpers
 # ===================================================================
 
 
-def _get_orch(
+async def _get_orch(
     session_id: str,
-    registry: dict[str, Orchestrator],
+    registry: OrchestratorRegistry,
+    db: Database,
+    llm: LLMClient,
+    roles: RoleManager,
 ) -> Orchestrator:
-    """从注册表中查找 Orchestrator，找不到则 404。"""
+    """查询 Orchestrator：先查内存注册表，未命中则从 DB 恢复。
+
+    服务重启后内存注册表为空，但 session 数据仍在 DB 中。
+    本函数自动检测并恢复，确保会话在重启后仍然可用。
+    """
+    # ① 快速路径：内存命中
     orch = registry.get(session_id)
+    if orch is not None:
+        return orch
+
+    # ② 慢速路径：从 DB 恢复（服务重启后）
+    orch = await Orchestrator.restore(
+        session_id,
+        database=db,
+        llm_client=llm,
+        role_manager=roles,
+    )
     if orch is None:
         raise HTTPException(
             status_code=404,
             detail=f"会话不存在或已过期：{session_id}",
         )
+    registry[session_id] = orch
+    logger.info("会话 %s 已从数据库自动恢复（phase=%s）。", session_id, orch.state.value)
     return orch
 
 
@@ -71,7 +93,7 @@ async def create_session(
     db: Database = Depends(use_db),
     llm: LLMClient = Depends(use_llm_client),
     roles: RoleManager = Depends(use_role_manager),
-    registry: dict[str, Orchestrator] = Depends(use_orchestrator_registry),
+    registry: OrchestratorRegistry = Depends(use_orchestrator_registry),
     tracker: TokenTracker = Depends(use_token_tracker),
 ) -> APIResponse:
     """创建测验会话。
@@ -101,6 +123,10 @@ async def create_session(
     )
 
     registry[session_id] = orch
+
+    # 立即持久化初始 IDLE 状态（确保服务重启后可恢复）
+    await orch.save()
+
     logger.info(
         "Session created: id=%s material=%s title=%r",
         session_id,
@@ -122,21 +148,62 @@ async def create_session(
 @router.get("/{session_id}/questions", response_model=APIResponse)
 async def get_questions(
     session_id: str,
-    registry: dict[str, Orchestrator] = Depends(use_orchestrator_registry),
+    registry: OrchestratorRegistry = Depends(use_orchestrator_registry),
+    db: Database = Depends(use_db),
+    llm: LLMClient = Depends(use_llm_client),
+    roles: RoleManager = Depends(use_role_manager),
 ) -> APIResponse:
     """获取测验题目列表。
 
     首次调用时自动触发 PDF 解析与题目生成（IDLE → PARSING → QUIZ_GEN）。
-    后续调用直接返回已缓存的题目。
+    后续调用直接返回已缓存的题目（优先从 DB 读取，避免重复消耗 Token）。
 
     返回的题目**不含正确答案**，确保前端无法通过抓包作弊。
     """
-    orch = _get_orch(session_id, registry)
+    orch = await _get_orch(session_id, registry, db, llm, roles)
 
+    from super_tutor.models.enums import PipelinePhase
+
+    # ① 优先从 DB 读取已有题目（避免重复消耗 Token）
+    questions_from_db = await db.list_questions_by_session(session_id)
+    if questions_from_db:
+        # 确保 orchestrator 状态一致（至少有题目可用）
+        if orch.state == PipelinePhase.IDLE:
+            orch._phase = PipelinePhase.QUIZ_GEN
+        safe_questions: list[dict] = []
+        for q in questions_from_db:
+            options_raw = q.get("options", "[]")
+            if isinstance(options_raw, str):
+                try:
+                    options = _json.loads(options_raw)
+                except (_json.JSONDecodeError, TypeError):
+                    options = []
+            else:
+                options = options_raw
+            safe_questions.append(
+                QuestionResponse(
+                    question_id=q["question_id"],
+                    stem=q["stem"],
+                    type=q.get("type", "multiple_choice"),
+                    difficulty=q.get("difficulty", "medium"),
+                    topic=q.get("topic", ""),
+                    options=options,
+                    hints=[],
+                    points=q.get("points", 1.0),
+                    estimated_seconds=q.get("estimated_seconds", 120),
+                ).model_dump()
+            )
+        return APIResponse(
+            data={
+                "session_id": session_id,
+                "state": orch.state.value,
+                "question_count": len(safe_questions),
+                "questions": safe_questions,
+            }
+        )
+
+    # ② 无 DB 缓存 → 触发流水线生成题目
     try:
-        # 根据当前状态决定需要推进几步
-        from super_tutor.models.enums import PipelinePhase
-
         if orch.state == PipelinePhase.IDLE:
             await orch.start()  # IDLE → PARSING
             await orch.proceed()  # PARSING → QUIZ_GEN
@@ -161,9 +228,9 @@ async def get_questions(
             detail=f"题目生成失败：{exc}",
         ) from exc
 
-    # 提取题目（去掉正确答案）
+    # ③ 从内存 artifacts 提取题目（去掉正确答案）
     raw_questions: list[dict] = orch._artifacts.get("questions", [])
-    safe_questions: list[dict] = []
+    safe_questions = []
     for q in raw_questions:
         safe_questions.append(
             QuestionResponse(
@@ -193,14 +260,17 @@ async def get_questions(
 async def submit_answers(
     session_id: str,
     req: SubmitAnswersRequest,
-    registry: dict[str, Orchestrator] = Depends(use_orchestrator_registry),
+    registry: OrchestratorRegistry = Depends(use_orchestrator_registry),
+    db: Database = Depends(use_db),
+    llm: LLMClient = Depends(use_llm_client),
+    roles: RoleManager = Depends(use_role_manager),
 ) -> APIResponse:
     """提交学生作答并自动触发批改。
 
     将作答注入 Orchestrator，推进至 EVALUATING 阶段。
     LLM 会逐题判定对错、打分，并诊断错题背后的迷思概念。
     """
-    orch = _get_orch(session_id, registry)
+    orch = await _get_orch(session_id, registry, db, llm, roles)
 
     from super_tutor.models.enums import PipelinePhase
 
@@ -259,13 +329,16 @@ async def submit_answers(
 @router.get("/{session_id}/results", response_model=APIResponse)
 async def get_results(
     session_id: str,
-    registry: dict[str, Orchestrator] = Depends(use_orchestrator_registry),
+    registry: OrchestratorRegistry = Depends(use_orchestrator_registry),
+    db: Database = Depends(use_db),
+    llm: LLMClient = Depends(use_llm_client),
+    roles: RoleManager = Depends(use_role_manager),
 ) -> APIResponse:
     """获取批改结果与迷思概念诊断。
 
     需在提交作答后调用。返回逐题判定、得分、迷思概念标签及总体评估。
     """
-    orch = _get_orch(session_id, registry)
+    orch = await _get_orch(session_id, registry, db, llm, roles)
 
     from super_tutor.models.enums import PipelinePhase
 
@@ -301,14 +374,17 @@ async def get_results(
 @router.post("/{session_id}/plan", response_model=APIResponse)
 async def generate_plan(
     session_id: str,
-    registry: dict[str, Orchestrator] = Depends(use_orchestrator_registry),
+    registry: OrchestratorRegistry = Depends(use_orchestrator_registry),
+    db: Database = Depends(use_db),
+    llm: LLMClient = Depends(use_llm_client),
+    roles: RoleManager = Depends(use_role_manager),
 ) -> APIResponse:
     """生成 SM-2 间隔重复复习计划。
 
     基于批改结果和迷思概念诊断，由 Tutor 角色生成个性化排期。
     每天学习量不超过 2 小时，薄弱知识点排在高优先级。
     """
-    orch = _get_orch(session_id, registry)
+    orch = await _get_orch(session_id, registry, db, llm, roles)
 
     from super_tutor.models.enums import PipelinePhase
 
@@ -346,4 +422,95 @@ async def generate_plan(
             plan_items=plan_items,
             summary=plan_summary,
         ).model_dump()
+    )
+
+
+# ===================================================================
+# Session lifecycle — restore / resume / retry
+# ===================================================================
+
+
+@router.post("/{session_id}/restore", response_model=APIResponse)
+async def restore_session(
+    session_id: str,
+    db: Database = Depends(use_db),
+    llm: LLMClient = Depends(use_llm_client),
+    roles: RoleManager = Depends(use_role_manager),
+    registry: OrchestratorRegistry = Depends(use_orchestrator_registry),
+) -> APIResponse:
+    """从数据库恢复一个已持久化的会话。
+
+    服务重启后使用，将 DB 中的会话重新加载到内存注册表。
+    若会话已在内存中，直接返回当前状态。
+    """
+    # 已在内存中
+    orch = registry.get(session_id)
+    if orch is not None:
+        return APIResponse(
+            data={"session_id": session_id, "state": orch.state.value},
+            message="会话已在内存中，无需恢复。",
+        )
+
+    orch = await Orchestrator.restore(
+        session_id, database=db, llm_client=llm, role_manager=roles,
+    )
+    if orch is None:
+        raise HTTPException(status_code=404, detail=f"会话不存在：{session_id}")
+
+    registry[session_id] = orch
+    logger.info("会话 %s 已从数据库手动恢复。", session_id)
+    return APIResponse(
+        data={"session_id": session_id, "state": orch.state.value},
+        message="会话已从数据库恢复。",
+    )
+
+
+@router.post("/{session_id}/resume", response_model=APIResponse)
+async def resume_session(
+    session_id: str,
+    registry: OrchestratorRegistry = Depends(use_orchestrator_registry),
+    db: Database = Depends(use_db),
+    llm: LLMClient = Depends(use_llm_client),
+    roles: RoleManager = Depends(use_role_manager),
+) -> APIResponse:
+    """恢复一个暂停的会话并从当前阶段继续。
+
+    仅当会话处于暂停状态（``_paused=True``）时可用。
+    """
+    orch = await _get_orch(session_id, registry, db, llm, roles)
+    try:
+        await orch.resume()
+    except OrchestratorError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return APIResponse(
+        data={"session_id": session_id, "state": orch.state.value},
+        message="会话已恢复。",
+    )
+
+
+@router.post("/{session_id}/retry", response_model=APIResponse)
+async def retry_session_step(
+    session_id: str,
+    registry: OrchestratorRegistry = Depends(use_orchestrator_registry),
+    db: Database = Depends(use_db),
+    llm: LLMClient = Depends(use_llm_client),
+    roles: RoleManager = Depends(use_role_manager),
+) -> APIResponse:
+    """重试当前失败的步骤。
+
+    仅当会话处于错误状态（``_error_message is not None``）时可用。
+    连续重试上限为 ``_MAX_STEP_RETRIES``（3 次），超过后需人工介入。
+    """
+    orch = await _get_orch(session_id, registry, db, llm, roles)
+    try:
+        await orch.retry_step()
+    except OrchestratorError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return APIResponse(
+        data={
+            "session_id": session_id,
+            "state": orch.state.value,
+            "error_message": orch._error_message,
+        },
+        message="步骤已重试。" if orch._error_message is None else "重试已达上限，请人工介入。",
     )

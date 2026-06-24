@@ -1,3 +1,4 @@
+<!-- version: 1.0.0 | updated: 2026-06-24 | role: evaluator -->
 # Evaluator 角色 — 作答批改 + 迷思概念诊断
 
 ## 你是谁

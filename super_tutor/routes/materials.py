@@ -12,9 +12,10 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
 from super_tutor.core.database import Database
+from super_tutor.core.limiter import limiter
 from super_tutor.routes.dependencies import use_db
 from super_tutor.routes.schemas import (
     APIResponse,
@@ -43,7 +44,9 @@ except ImportError:  # pragma: no cover
 
 
 @router.post("/upload", response_model=APIResponse, status_code=201)
+@limiter.limit("10/minute")
 async def upload_material(
+    request: Request,
     req: MaterialUploadRequest,
     db: Database = Depends(use_db),
 ) -> APIResponse:
@@ -70,7 +73,9 @@ async def upload_material(
 
 
 @router.post("/upload/file", response_model=APIResponse, status_code=201)
+@limiter.limit("5/minute")
 async def upload_material_file(
+    request: Request,
     file: UploadFile = File(..., description="PDF 教材文件（≤50MB）"),
     title: str = Form(..., description="材料标题"),
     subject: str = Form(default="", description="所属学科"),
@@ -94,9 +99,28 @@ async def upload_material_file(
             detail=f"不支持的文件格式 '{file.content_type}'，仅接受 PDF。",
         )
 
-    # -- 读取文件内容 ----------------------------------------------------
+    # -- 分块读取文件内容（避免大文件占满内存）---------------------------
     try:
-        pdf_bytes = await file.read()
+        chunks: list[bytes] = []
+        total_read = 0
+        MAX_SIZE = 50 * 1024 * 1024  # 50MB 硬上限
+        CHUNK_SIZE = 1024 * 1024     # 1MB 分块
+
+        while True:
+            chunk = await file.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            total_read += len(chunk)
+            if total_read > MAX_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"文件过大（已超过 50MB 上限）。",
+                )
+            chunks.append(chunk)
+
+        pdf_bytes = b"".join(chunks)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to read uploaded file: %s", exc)
         raise HTTPException(
@@ -108,11 +132,6 @@ async def upload_material_file(
         raise HTTPException(status_code=400, detail="上传的文件为空。")
 
     file_size_mb = len(pdf_bytes) / (1024 * 1024)
-    if file_size_mb > 50:
-        raise HTTPException(
-            status_code=413,
-            detail=f"文件过大（{file_size_mb:.1f}MB），最大支持 50MB。",
-        )
 
     logger.info(
         "PDF upload: name=%r size=%.1fMB title=%r",

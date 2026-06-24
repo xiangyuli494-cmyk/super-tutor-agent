@@ -34,6 +34,63 @@ from super_tutor.core.token_tracker import TokenTracker
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Orchestrator Registry — 线程安全的会话注册表
+# ---------------------------------------------------------------------------
+
+
+class OrchestratorRegistry:
+    """异步安全的 Orchestrator 会话注册表。
+
+    使用 ``asyncio.Lock`` 保护写操作，读操作（``get``）利用
+    CPython GIL 下的 ``dict.get`` 原子性，无需加锁。
+    """
+
+    def __init__(self) -> None:
+        self._data: dict[str, "Orchestrator"] = {}
+        self._lock: "asyncio.Lock" = None  # type: ignore[assignment]
+
+    def _ensure_lock(self) -> "asyncio.Lock":
+        """懒初始化锁（避免在非事件循环上下文中创建）。"""
+        import asyncio
+
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def get(self, session_id: str) -> "Orchestrator | None":
+        """无锁读取（dict.get 在 CPython 中是原子操作）。"""
+        return self._data.get(session_id)
+
+    def get_sync(self, session_id: str) -> "Orchestrator | None":
+        """``get()`` 的别名，向后兼容。"""
+        return self.get(session_id)
+
+    async def set(self, session_id: str, orch: "Orchestrator") -> None:
+        """加锁写入。"""
+        lock = self._ensure_lock()
+        async with lock:
+            self._data[session_id] = orch
+
+    async def remove(self, session_id: str) -> None:
+        """加锁删除。"""
+        lock = self._ensure_lock()
+        async with lock:
+            self._data.pop(session_id, None)
+
+    def __setitem__(self, session_id: str, orch: "Orchestrator") -> None:
+        """直接赋值（非异步，用于简化创建流程）。
+
+        注意：此方法不加锁。在 FastAPI 的请求处理中，
+        每个请求在独立的协程中运行，但协程是协作式调度的，
+        因此简单的赋值在无 await 点时是安全的。
+        """
+        self._data[session_id] = orch
+
+    def __contains__(self, session_id: str) -> bool:
+        return session_id in self._data
+
+
+# ---------------------------------------------------------------------------
 # State keys — the attribute names stored on ``app.state`` at startup.
 # ---------------------------------------------------------------------------
 _S_CONFIG: str = "tutor_config"
@@ -93,7 +150,7 @@ async def init_app_state(app_state: AppState) -> None:
     logger.info("Token tracker ready (budget=%d).", config.token_budget_default)
 
     # -- Orchestrator Registry ------------------------------------------
-    setattr(app_state, _S_ORCH_REGISTRY, {})
+    setattr(app_state, _S_ORCH_REGISTRY, OrchestratorRegistry())
 
 
 async def shutdown_app_state(app_state: AppState) -> None:
@@ -145,8 +202,8 @@ def use_role_manager(request: Request) -> RoleManager:
     return getattr(request.app.state, _S_ROLES)
 
 
-def use_orchestrator_registry(request: Request) -> dict[str, Orchestrator]:
-    """回传 Orchestrator 会话注册表（dict[str, Orchestrator]）。"""
+def use_orchestrator_registry(request: Request) -> OrchestratorRegistry:
+    """回传 Orchestrator 会话注册表。"""
     return getattr(request.app.state, _S_ORCH_REGISTRY)
 
 
