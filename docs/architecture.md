@@ -82,7 +82,7 @@ super-tutor-agent/
 │   ├── main.py            # FastAPI 入口 + lifespan
 │   ├── config.py          # 配置管理（settings.json + env）
 │   ├── core/
-│   │   ├── orchestrator.py           # 流水线状态机核心 (837 行)
+│   │   ├── orchestrator.py           # LLM 调用+序列化+状态机 (837 行)
 │   │   ├── orchestrator_phases.py    # 四阶段 Mixin 实现 (751 行)
 │   │   ├── orchestrator_prompts.py   # LLM Prompt 构建函数 (182 行)
 │   │   ├── orchestrator_utils.py     # JSON 解析/模型水合/图谱 (257 行)
