@@ -12,9 +12,12 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from super_tutor import __version__
 from super_tutor.core.exceptions import TutorError
+from super_tutor.core.limiter import limiter
 from super_tutor.routes import (
     dashboard_router,
     materials_router,
@@ -73,6 +76,12 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# ---------------------------------------------------------------------------
+# Rate Limiter — attach to app state + exception handler
+# ---------------------------------------------------------------------------
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ---------------------------------------------------------------------------
 # Middleware
@@ -139,9 +148,23 @@ async def generic_error_handler(request: Request, exc: Exception) -> JSONRespons
 
 
 @app.get("/api/v1/health")
-async def health_check() -> dict:
-    """健康检查端点。"""
-    return {"code": 0, "message": "ok", "data": {"version": __version__}}
+async def health_check(request: Request) -> dict:
+    """健康检查端点（含 prompt 版本信息）。"""
+    prompt_versions: dict = {}
+    try:
+        roles = getattr(request.app.state, "tutor_role_manager", None)
+        if roles is not None and hasattr(roles, "get_all_versions"):
+            prompt_versions = roles.get_all_versions()
+    except Exception:
+        pass
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "version": __version__,
+            "prompt_versions": prompt_versions,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

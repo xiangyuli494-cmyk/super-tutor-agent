@@ -363,8 +363,10 @@ class Database:
     _DDL_SESSIONS = """
     CREATE TABLE IF NOT EXISTS sessions (
         session_id        TEXT PRIMARY KEY,
+        user_id           TEXT NOT NULL DEFAULT '',
         state             TEXT NOT NULL DEFAULT 'idle',
         previous_state    TEXT NOT NULL DEFAULT 'idle',
+        in_progress       INTEGER NOT NULL DEFAULT 0,
         error_message     TEXT,
         step_retry_count  INTEGER NOT NULL DEFAULT 0,
         session_context   TEXT NOT NULL DEFAULT '{}',
@@ -374,6 +376,8 @@ class Database:
         created_at        TEXT NOT NULL,
         updated_at        TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS idx_sessions_user_id
+        ON sessions(user_id);
     """
 
     # ------------------------------------------------------------------
@@ -515,6 +519,18 @@ class Database:
             )
         except Exception:
             pass  # column already exists — fine
+
+        # -- Migration: add user_id + in_progress to sessions (v0.3→v0.4) --
+        for col_name, col_type, col_default in [
+            ("user_id", "TEXT", "''"),
+            ("in_progress", "INTEGER", "0"),
+        ]:
+            try:
+                await self._conn.execute(
+                    f"ALTER TABLE sessions ADD COLUMN {col_name} {col_type} NOT NULL DEFAULT {col_default}"
+                )
+            except Exception:
+                pass  # column already exists — fine
 
         await self._conn.commit()
 
@@ -1395,7 +1411,7 @@ class Database:
             return str(value) if value else "[]"
 
         await self._conn.execute(
-            """INSERT INTO questions
+            """INSERT OR REPLACE INTO questions
                (question_id, session_id, type, difficulty, subject, topic,
                 stem, options, correct_answer, explanation, chunk_ids,
                 knowledge_node_ids, estimated_seconds, points, tags, metadata,
@@ -1438,6 +1454,28 @@ class Database:
         )
         row = await cursor.fetchone()
         return self._row_to_dict(row) if row else None
+
+    async def get_questions_batch(
+        self, question_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Batch-fetch questions by IDs (avoids N+1 queries).
+
+        Args:
+            question_ids: List of question IDs to fetch. Empty list → empty dict.
+
+        Returns:
+            Dict mapping ``question_id`` → question row dict.
+        """
+        if not question_ids:
+            return {}
+        assert self._conn is not None
+        placeholders = ",".join("?" for _ in question_ids)
+        cursor = await self._conn.execute(
+            f"SELECT * FROM questions WHERE question_id IN ({placeholders})",
+            tuple(question_ids),
+        )
+        rows = await cursor.fetchall()
+        return {self._row_to_dict(r)["question_id"]: self._row_to_dict(r) for r in rows}
 
     async def list_questions_by_session(
         self, session_id: str
@@ -1482,7 +1520,7 @@ class Database:
             student_answer = str(student_answer)
 
         await self._conn.execute(
-            """INSERT INTO quiz_attempts
+            """INSERT OR REPLACE INTO quiz_attempts
                (attempt_id, session_id, student_id, question_id, student_answer, is_correct,
                 score, time_spent_seconds, hints_used, attempt_number, confidence,
                 misconception_ids, note, started_at, submitted_at, metadata)
@@ -1828,14 +1866,16 @@ class Database:
         assert self._conn is not None
         await self._conn.execute(
             """INSERT OR REPLACE INTO sessions
-               (session_id, state, previous_state, error_message,
-                step_retry_count, session_context, artifacts,
+               (session_id, user_id, state, previous_state, in_progress,
+                error_message, step_retry_count, session_context, artifacts,
                 role_statuses, role_tasks, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_data["session_id"],
+                session_data.get("user_id", ""),
                 session_data["state"],
                 session_data["previous_state"],
+                session_data.get("in_progress", 0),
                 session_data.get("error_message"),
                 session_data.get("step_retry_count", 0),
                 json.dumps(session_data.get("session_context", {})),

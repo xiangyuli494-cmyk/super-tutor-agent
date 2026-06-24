@@ -65,10 +65,15 @@ async def get_dashboard(
     # 提取最近 10 条
     recent = all_attempts[:10]
 
-    # 从 question 表中查各题 topic，按正确率分组统计薄弱/优势知识点
+    # 批量查询所有题目（一次 JOIN 替代 N 次 get_question）避免 N+1
+    question_ids = list({
+        a.get("question_id", "") for a in all_attempts if a.get("question_id")
+    })
+    question_map = await db.get_questions_batch(question_ids)
+
     topic_stats: dict[str, dict[str, int]] = {}  # topic → {total, correct}
     for a in all_attempts:
-        q = await db.get_question(a.get("question_id", ""))
+        q = question_map.get(a.get("question_id", ""))
         topic = q.get("topic", "未分类") if q else "未分类"
         if topic not in topic_stats:
             topic_stats[topic] = {"total": 0, "correct": 0}

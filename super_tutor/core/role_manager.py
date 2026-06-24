@@ -78,6 +78,42 @@ class RoleManager:
         logger.info("Loaded system prompt for role=%s from %s", role, template_path)
         return content
 
+    # ------------------------------------------------------------------
+    # Prompt version tracking
+    # ------------------------------------------------------------------
+
+    _VERSION_RE = __import__("re").compile(
+        r"<!--\s*version:\s*(\S+)\s*\|\s*updated:\s*(\S+)\s*.*?-->"
+    )
+
+    @classmethod
+    def _parse_version(cls, content: str) -> dict[str, str] | None:
+        """从首行 ``<!-- version: ... -->`` 注释中提取版本信息。
+
+        Returns:
+            ``{"version": "1.0.0", "updated": "2026-06-24"}`` 或 ``None``。
+        """
+        first_line = content.split("\n", 1)[0]
+        match = cls._VERSION_RE.search(first_line)
+        if match:
+            return {"version": match.group(1), "updated": match.group(2)}
+        return None
+
+    def get_all_versions(self) -> dict[str, dict[str, str] | None]:
+        """返回所有已加载角色的 prompt 版本信息。
+
+        Returns:
+            ``{"tutor": {"version": "1.0.0", "updated": "2026-06-24"}, ...}``。
+            未加载的角色值为 ``None``。
+        """
+        result: dict[str, dict[str, str] | None] = {}
+        for role in VALID_ROLES:
+            if role in self._cache:
+                result[role] = self._parse_version(self._cache[role])
+            else:
+                result[role] = None
+        return result
+
     def build_context(
         self,
         role: str,

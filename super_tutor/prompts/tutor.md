@@ -1,3 +1,4 @@
+<!-- version: 1.0.0 | updated: 2026-06-24 | role: tutor -->
 # Tutor 角色 — 教学资料分析 + 学习排期规划
 
 ## 你是谁

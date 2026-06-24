@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 _MAX_STEP_RETRIES: int = 3
 """单步最大连续重试次数，超过后停留 ERROR 等待人工介入。"""
 
+_VALID_PHASE_VALUES: set[str] = {p.value for p in PipelinePhase}
+"""所有合法 PipelinePhase 枚举值，用于 DB 恢复时的校验。"""
+
 # 各阶段使用的 LLM 算力档位
 _PARSING_MODEL_TIER: str = "heavy"       # PDF 解析需要强理解能力
 _QUIZ_GEN_MODEL_TIER: str = "heavy"      # 出题需要高质量输出
@@ -132,6 +135,7 @@ class Orchestrator:
         self._paused: bool = False
         self._error_message: Optional[str] = None
         self._step_retry_count: int = 0
+        self._in_progress: bool = False
 
         # ------------------------------------------------------------------
         # 阶段产出物 — 上游阶段写入，下游阶段读取
@@ -218,6 +222,12 @@ class Orchestrator:
 
         由 Parser 角色（Tutor）解析 PDF 材料，生成知识片段。
 
+        状态机采用 **DB 作为唯一真相源** 模式：
+        ① 读取 DB 确认当前状态
+        ② 修改内存状态
+        ③ 写入 DB（崩溃恢复边界）
+        ④ 执行 Agent
+
         Raises:
             OrchestratorError: 若不是从 IDLE 阶段调用。
         """
@@ -229,9 +239,28 @@ class Orchestrator:
         if self._paused:
             raise OrchestratorError("流水线已暂停，请先调用 resume()。")
 
+        # ① 以 DB 为唯一真相源，确认当前状态
+        if self.session_id:
+            db_state = await self._db.load_session(self.session_id)
+            if db_state is not None:
+                db_phase_raw = db_state.get("state", db_state.get("phase", "idle"))
+                if db_phase_raw != PipelinePhase.IDLE.value:
+                    self._phase = PipelinePhase(db_phase_raw)
+                    raise OrchestratorError(
+                        f"会话已在 '{db_phase_raw}' 阶段，无法从 IDLE 重新启动。"
+                        f"请通过 GET /sessions/{self.session_id}/questions 自动恢复。"
+                    )
+
+        # ② 修改状态（内存）
         self._previous_phase = self._phase
         self._phase = PipelinePhase.PARSING
+        self._in_progress = True
         logger.info("阶段推进: %s → %s", self._previous_phase.value, self._phase.value)
+
+        # ③ 状态先写入 DB（崩溃恢复边界：DB 先落地，再执行 Agent）
+        await self.save()
+
+        # ④ 执行 Agent
         await self._parsing_phase()
 
     async def submit_answers(
@@ -309,7 +338,11 @@ class Orchestrator:
     async def proceed(self) -> None:
         """推进流水线一步。
 
-        根据当前阶段自动判断下一步并执行对应阶段。
+        状态机采用 **DB 作为唯一真相源** 模式：
+        ① 读取 DB 同步当前状态（修复内存/DB 不一致）
+        ② 计算下一阶段并修改内存状态
+        ③ 写入 DB（崩溃恢复边界）
+        ④ 执行 Agent
 
         Raises:
             OrchestratorError: 若从 IDLE / 暂停 / 错误 / 已完成 状态调用。
@@ -320,12 +353,28 @@ class Orchestrator:
             raise OrchestratorError(
                 f"流水线处于错误状态: {self._error_message}。请先调用 retry_step()。"
             )
+
+        # ① 以 DB 为唯一真相源，同步当前状态
+        if self.session_id:
+            db_state = await self._db.load_session(self.session_id)
+            if db_state is not None:
+                db_phase_raw = db_state.get("state", db_state.get("phase", "idle"))
+                if db_phase_raw not in _VALID_PHASE_VALUES:
+                    db_phase_raw = PipelinePhase.IDLE.value
+                db_phase = PipelinePhase(db_phase_raw)
+                if db_phase != self._phase:
+                    logger.warning(
+                        "内存状态 %s 与 DB 状态 %s 不一致，以 DB 为准。",
+                        self._phase.value, db_phase.value,
+                    )
+                    self._phase = db_phase
+
         if self._phase == PipelinePhase.IDLE:
             raise OrchestratorError("请先调用 start() 启动流水线。")
         if self._phase == PipelinePhase.PLANNING:
             raise OrchestratorError("流水线已完成全部阶段，无需再推进。")
 
-        # 线性阶段转换
+        # ② 计算下一阶段并修改内存状态
         _NEXT_PHASE: dict[PipelinePhase, PipelinePhase] = {
             PipelinePhase.PARSING: PipelinePhase.QUIZ_GEN,
             PipelinePhase.QUIZ_GEN: PipelinePhase.EVALUATING,
@@ -334,9 +383,13 @@ class Orchestrator:
         next_phase = _NEXT_PHASE[self._phase]
         self._previous_phase = self._phase
         self._phase = next_phase
+        self._in_progress = True
         logger.info("阶段推进: %s → %s", self._previous_phase.value, next_phase.value)
 
-        # 执行对应阶段
+        # ③ 状态先写入 DB（崩溃恢复边界：DB 先落地，再执行 Agent）
+        await self.save()
+
+        # ④ 执行 Agent
         _PHASE_HANDLER = {
             PipelinePhase.PARSING: self._parsing_phase,
             PipelinePhase.QUIZ_GEN: self._quiz_gen_phase,
@@ -399,8 +452,10 @@ class Orchestrator:
         now_iso = datetime.now(timezone.utc).isoformat()
         await self._db.save_session({
             "session_id": session_id,
+            "user_id": self._session_context.get("student_id", ""),
             "state": self._phase.value,
             "previous_state": self._previous_phase.value,
+            "in_progress": 1 if self._in_progress else 0,
             "error_message": self._error_message,
             "step_retry_count": self._step_retry_count,
             "session_context": self._session_context,
@@ -411,6 +466,44 @@ class Orchestrator:
             "updated_at": now_iso,
         })
         logger.debug("会话 %s 已持久化（phase=%s）。", session_id, self._phase.value)
+
+    # ==================================================================
+    # 阶段生命周期钩子
+    # ==================================================================
+
+    async def _start_phase(
+        self, phase: PipelinePhase, role: AIRole, task: str,
+    ) -> None:
+        """阶段开始前的角色状态更新。
+
+        注意：状态转换（phase + in_progress）已由调用方
+        ``start()`` / ``proceed()`` / ``retry_step()`` 在调用本方法前
+        写入 DB。本方法仅更新运行时角色追踪状态（内存）。
+
+        Args:
+            phase: 即将执行的流水线阶段。
+            role: 负责该阶段的 AI 角色。
+            task: 角色当前任务的简短描述。
+        """
+        self._set_role_status(role, "active", task)
+        logger.debug("阶段 %s 已开始（role=%s, task=%s）", phase.value, role.value, task)
+
+    async def _end_phase(
+        self, phase: PipelinePhase, role: AIRole,
+    ) -> None:
+        """阶段完成后的保存点。
+
+        标记 ``_in_progress=False``，将角色状态设为空闲，
+        并立即持久化。
+
+        Args:
+            phase: 刚刚完成的流水线阶段。
+            role: 负责该阶段的 AI 角色。
+        """
+        self._in_progress = False
+        self._set_role_status(role, "idle", None)
+        await self.save()
+        logger.debug("阶段 %s 已完成（in_progress=False）", phase.value)
 
     @classmethod
     async def restore(
@@ -446,16 +539,16 @@ class Orchestrator:
         raw_phase = data.get("phase", data.get("state", "idle"))
         raw_prev = data.get("previous_phase", data.get("previous_state", "idle"))
         # 旧数据中可能有 "done"/"paused"/"error" 等已移除的枚举值，回退到 idle
-        _VALID_PHASES = {p.value for p in PipelinePhase}
-        if raw_phase not in _VALID_PHASES:
-            raw_phase = "idle"
-        if raw_prev not in _VALID_PHASES:
-            raw_prev = "idle"
+        if raw_phase not in _VALID_PHASE_VALUES:
+            raw_phase = PipelinePhase.IDLE.value
+        if raw_prev not in _VALID_PHASE_VALUES:
+            raw_prev = PipelinePhase.IDLE.value
         orch._phase = PipelinePhase(raw_phase)
         orch._previous_phase = PipelinePhase(raw_prev)
         orch._paused = data.get("paused", False)
         orch._error_message = data.get("error_message")
         orch._step_retry_count = data.get("step_retry_count", 0)
+        orch._in_progress = bool(data.get("in_progress", 0))
         orch._session_context = data.get("session_context", {})
 
         # 还原 AI 角色状态
@@ -496,6 +589,20 @@ class Orchestrator:
                 raw_artifacts["plan_items"], ReviewItem,
             )
 
+        # -- 崩溃恢复：若上次运行时在阶段中途崩溃，回退到上一阶段 ----
+        if orch._in_progress:
+            logger.warning(
+                "会话 %s 上次运行在 %s 阶段中途崩溃（in_progress=1），"
+                "回退到 %s 等待重试。",
+                session_id, orch._phase.value, orch._previous_phase.value,
+            )
+            orch._error_message = (
+                f"上次 {orch._phase.value} 阶段执行中断（服务器重启或崩溃）。"
+                f"将在下次推进时自动重试。"
+            )
+            orch._phase = orch._previous_phase  # 回退到上一阶段
+            orch._in_progress = False  # 重置标记，让重试正常进行
+
         logger.info(
             "会话 %s 已恢复（phase=%s, artifacts=%d keys）。",
             session_id, orch._phase.value, len(raw_artifacts),
@@ -504,6 +611,10 @@ class Orchestrator:
 
     async def retry_step(self) -> None:
         """重试当前失败步骤。
+
+        状态机采用 **DB 作为唯一真相源** 模式：
+        ① 清除错误、标记 in_progress、写入 DB
+        ② 执行 Agent
 
         限制连续重试 ``_MAX_STEP_RETRIES`` 次，超过后保持错误。
 
@@ -518,6 +629,7 @@ class Orchestrator:
             self._error_message = (
                 f"步骤重试已达上限（{_MAX_STEP_RETRIES} 次），请人工介入。"
             )
+            await self.save()  # 持久化最终失败状态
             logger.error(self._error_message)
             return
 
@@ -529,8 +641,12 @@ class Orchestrator:
             failed_phase.value,
         )
         self._error_message = None
+        self._in_progress = True
 
-        # 重新执行当前阶段
+        # ① 状态先写入 DB（崩溃恢复边界：DB 先落地，再执行 Agent）
+        await self.save()
+
+        # ② 执行 Agent
         _PHASE_HANDLER = {
             PipelinePhase.PARSING: self._parsing_phase,
             PipelinePhase.QUIZ_GEN: self._quiz_gen_phase,
@@ -580,7 +696,7 @@ class Orchestrator:
         下一状态：QUIZ_GEN
         """
         role = AIRole.TUTOR
-        self._set_role_status(role, "active", "解析 PDF 材料，生成知识片段")
+        await self._start_phase(PipelinePhase.PARSING, role, "解析 PDF 材料，生成知识片段")
 
         material_id = self._session_context.get("material_id", "unknown")
 
@@ -654,12 +770,12 @@ class Orchestrator:
                 },
             )
 
-            self._set_role_status(role, "idle", None)
+            await self._end_phase(PipelinePhase.PARSING, role)
             logger.info("PARSING 阶段完成：%d 个知识片段。", len(chunks))
 
         except Exception as exc:
             self._set_role_status(role, "error", str(exc))
-            self._handle_phase_error(exc)
+            await self._handle_phase_error(exc)
             raise
 
     async def _quiz_gen_phase(self) -> None:
@@ -670,7 +786,7 @@ class Orchestrator:
         下一状态：EVALUATING
         """
         role = AIRole.ASSISTANT
-        self._set_role_status(role, "active", "基于知识库生成测验题目")
+        await self._start_phase(PipelinePhase.QUIZ_GEN, role, "基于知识库生成测验题目")
 
         chunks = self._artifacts.get("chunks", [])
 
@@ -708,6 +824,43 @@ class Orchestrator:
             self._artifacts["question_models"] = questions    # Pydantic 模型供内部消费
             self._artifacts["quiz_gen_output"] = response
 
+            # -- 持久化题目到 questions 表（避免丢失后重新消耗 Token）--
+            session_id = self.session_id or "unknown"
+            now_iso = datetime.now(timezone.utc).isoformat()
+            persisted_q = 0
+            for i, q_raw in enumerate(questions_raw):
+                try:
+                    qid = q_raw.get("question_id", str(uuid4()))
+                    await self._db.insert_question({
+                        "question_id": qid,
+                        "session_id": session_id,
+                        "type": q_raw.get("type", "multiple_choice"),
+                        "difficulty": q_raw.get("difficulty", "medium"),
+                        "subject": q_raw.get("subject", ""),
+                        "topic": q_raw.get("topic", ""),
+                        "stem": q_raw.get("stem", ""),
+                        "options": q_raw.get("options", []),
+                        "correct_answer": q_raw.get("correct_answer", ""),
+                        "explanation": q_raw.get("explanation", ""),
+                        "chunk_ids": q_raw.get("chunk_ids", chunk_id_list),
+                        "knowledge_node_ids": q_raw.get("knowledge_node_ids", []),
+                        "estimated_seconds": q_raw.get("estimated_seconds", 120),
+                        "points": q_raw.get("points", 1.0),
+                        "tags": q_raw.get("tags", []),
+                        "metadata": q_raw.get("metadata", {}),
+                        "created_at": now_iso,
+                    })
+                    persisted_q += 1
+                except Exception as exc:
+                    logger.warning(
+                        "题目 %s 持久化失败: %s",
+                        q_raw.get("question_id", f"#{i}"), exc,
+                    )
+            logger.info(
+                "QUIZ_GEN: %d/%d 道题目已持久化到 questions 表。",
+                persisted_q, len(questions_raw),
+            )
+
             await self._on_step_complete(
                 role=role.value,
                 artifact={
@@ -718,12 +871,12 @@ class Orchestrator:
                 },
             )
 
-            self._set_role_status(role, "idle", None)
+            await self._end_phase(PipelinePhase.QUIZ_GEN, role)
             logger.info("QUIZ_GEN 阶段完成：%d 道题目。", len(questions))
 
         except Exception as exc:
             self._set_role_status(role, "error", str(exc))
-            self._handle_phase_error(exc)
+            await self._handle_phase_error(exc)
             raise
 
     async def _evaluating_phase(self) -> None:
@@ -734,7 +887,7 @@ class Orchestrator:
         下一状态：PLANNING
         """
         role = AIRole.EVALUATOR
-        self._set_role_status(role, "active", "批改作答，诊断迷思概念")
+        await self._start_phase(PipelinePhase.EVALUATING, role, "批改作答，诊断迷思概念")
 
         questions = self._artifacts.get("questions", [])
         student_answers = self._session_context.get("student_answers", [])
@@ -839,7 +992,7 @@ class Orchestrator:
                 },
             )
 
-            self._set_role_status(role, "idle", None)
+            await self._end_phase(PipelinePhase.EVALUATING, role)
             logger.info(
                 "EVALUATING 阶段完成：%d 题已批改，%d 个迷思概念。",
                 len(attempts),
@@ -848,7 +1001,7 @@ class Orchestrator:
 
         except Exception as exc:
             self._set_role_status(role, "error", str(exc))
-            self._handle_phase_error(exc)
+            await self._handle_phase_error(exc)
             raise
 
     async def _planning_phase(self) -> None:
@@ -859,7 +1012,7 @@ class Orchestrator:
         下一状态：DONE
         """
         role = AIRole.TUTOR
-        self._set_role_status(role, "active", "生成 SM-2 排期学习计划")
+        await self._start_phase(PipelinePhase.PLANNING, role, "生成 SM-2 排期学习计划")
 
         attempts = self._artifacts.get("attempts", [])
         misconceptions = self._artifacts.get("misconceptions", [])
@@ -975,12 +1128,12 @@ class Orchestrator:
                 },
             )
 
-            self._set_role_status(role, "idle", None)
+            await self._end_phase(PipelinePhase.PLANNING, role)
             logger.info("PLANNING 阶段完成：%d 个排期条目。", len(plan_items))
 
         except Exception as exc:
             self._set_role_status(role, "error", str(exc))
-            self._handle_phase_error(exc)
+            await self._handle_phase_error(exc)
             raise
 
     # ==================================================================
@@ -1255,10 +1408,14 @@ class Orchestrator:
             student_id,
         )
 
-    def _handle_phase_error(self, exc: Exception) -> None:
-        """记录阶段异常信息。"""
+    async def _handle_phase_error(self, exc: Exception) -> None:
+        """记录阶段异常并持久化错误状态。
+
+        注意：不重置 ``_in_progress``，保留崩溃标记以便恢复时回退。
+        """
         self._error_message = str(exc)
         self._previous_phase = self._phase
+        await self.save()
         logger.error("阶段执行失败: %s", exc)
 
     # ==================================================================
