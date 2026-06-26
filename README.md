@@ -1,41 +1,72 @@
-# 超级私教 (Super Tutor)
+# 🎓 超级私教 (Super Tutor)
 
 <br>
 
-> **扔给它一本 PDF 教材。它读、它出题、它批改、它诊断你错在哪、它帮你排复习计划。**
+> **上传资料 → 提取知识点 → 定位薄弱项 → 精准练习 → 错题追问 —— 一个完整的自学闭环。**
 >
-> 三个 AI 角色协作，像一个真正的私教一样盯住你每个知识点的掌握程度。
+> 基于 LLM 的深度学习辅助工具，围绕知识点构建从诊断到复习的完整学习链路。
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.35+-red)](https://streamlit.io/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-MVP%20开发中-orange)]()
-[![Tests](https://img.shields.io/badge/Tests-18/18%20passed-brightgreen)]()
+[![Status](https://img.shields.io/badge/Status-v3.0-brightgreen)]()
+[![Tests](https://img.shields.io/badge/Tests-148/148%20passed-brightgreen)]()
 
 ---
 
-## 它做了什么
+## 做了什么
 
-你扔给它一本《大学物理》PDF，它自动完成 4 件事：
+你扔给它一本教材 PDF，它自动完成：
 
 ```
-📄 上传 PDF           🤖 AI 出题              ✍️ 你答题               📊 它排计划
+📄 上传资料           🔬 诊断评估           ✏️ 练习答题           📕 错题本
 ┌──────────┐         ┌──────────┐         ┌──────────┐         ┌──────────┐
-│ 教材 PDF  │ ───→   │ 自动生成  │  ───→  │ 在线作答  │  ───→  │ 间隔重复 │
-│ 智能解析  │        │ 自适应测验 │        │ 即时批改  │        │ 复习排期 │
-│ 向量索引  │        │ 难度分层  │        │ 错因诊断  │        │ 今日清单 │
+│ PDF 上传  │  ───→  │ 全知识点  │  ───→  │ 6 种题型  │  ───→  │ 按知识点  │
+│ 文本粘贴  │        │ 摸底测验  │        │ 自动批改  │        │ 分组展示  │
+│ LLM 解析  │        │ 前后联动  │        │ 错题入库  │        │ 苏格拉底  │
+│ 依赖识别  │        │ 掌握度图  │        │ 详细解析  │        │ 式追问    │
 └──────────┘         └──────────┘         └──────────┘         └──────────┘
 ```
 
-> 不是「问答机器人」。是持续追踪你每个知识点掌握度的**认知孪生私教**。
+### 核心功能
 
-### 面向谁
+| 功能 | 说明 |
+|------|------|
+| 📚 资料上传 | PDF / 文本上传，LLM 自动提取知识点并识别前驱→后继依赖关系 |
+| 🔬 诊断评估 | 全知识点覆盖的摸底测验，3 条前置依赖规则精确定位薄弱环节 |
+| 📋 学习计划 | 拓扑排序 + 优先级公式，薄弱点多排、已掌握少排 |
+| ✏️ 练习答题 | 6 种题型（选择/判断/填空/简答/论述/编程），注入前驱知识点上下文 |
+| 📕 错题本 | 按知识点分组，支持查看解析、重新作答、苏格拉底式追问 |
+| 🗨 苏格拉底追问 | L1→L2→L3 三层递进引导，不直接给答案，引导自主发现 |
 
-| 用户 | 痛点 | 超级私教怎么帮 |
-|------|------|---------------|
-| 🎓 大学生 | 专业课 PDF 堆积如山，不知道从哪复习起 | 上传即解析，薄弱点优先出题 |
-| 📝 考研 / 考公 | 备考周期长（3-12 个月），学了忘忘了学 | SM-2 间隔重复，该复习时自动提醒 |
-| 💻 自学编程 | 技术文档看完记不住，不知道自己到底会没会 | 自动出题检验，诊断 ≠ 判对错 |
+---
+
+## 技术架构
+
+```
+app.py (Streamlit 前端)
+    │
+    ├── engine/
+    │   ├── knowledge_engine.py    # 知识点解析 + 前后依赖
+    │   ├── assessment_engine.py   # 诊断评估 + 前置规则
+    │   ├── quiz_engine.py         # 出题 + 程序/LLM混合批改
+    │   ├── plan_engine.py         # 拓扑排序 + 学习计划
+    │   └── socratic_engine.py     # 苏格拉底追问 (L1→L2→L3)
+    │
+    ├── core/
+    │   ├── database.py            # SQLite 6 表
+    │   ├── llm_client.py          # DeepSeek API
+    │   └── exceptions.py          # 异常定义
+    │
+    └── models/                    # Pydantic 数据模型
+```
+
+- **前端**: Streamlit 单页应用，一个 `streamlit run` 启动
+- **后端**: FastAPI（可选 API 扩展）
+- **LLM**: DeepSeek API
+- **数据库**: SQLite 6 表（materials / knowledge_points / questions / quiz_attempts / wrong_questions / study_plans）
+- **无状态机**: 页面按钮驱动用户流程，去掉旧 Orchestrator 状态机 (~2,200 行)
 
 ---
 
@@ -44,39 +75,36 @@
 ### 前置要求
 
 - Python 3.11+
-- Node.js 18+
 - DeepSeek API Key
 
-### 后端
+### 安装
 
 ```bash
 pip install -r requirements.txt
-python -m super_tutor.main
-# API 文档自动生成于 http://localhost:8765/docs
-```
-
-### 前端
-
-```bash
-cd frontend
-npm install
-npm run dev
-# 开发服务器启动于 http://localhost:5173
 ```
 
 ### 配置
 
-在 `~/.super-tutor/settings.json` 中配置 API Key：
+通过环境变量设置 API Key：
 
-```json
-{
-    "deepseek_api_key": "sk-your-key-here",
-    "deepseek_base_url": "https://api.deepseek.com",
-    "token_budget_default": 1000000
-}
+```bash
+# Windows PowerShell
+$env:TUTOR_API_KEY="sk-your-key-here"
+$env:TUTOR_API_BASE_URL="https://api.deepseek.com"
+
+# Linux / macOS
+export TUTOR_API_KEY="sk-your-key-here"
+export TUTOR_API_BASE_URL="https://api.deepseek.com"
 ```
 
-也可通过环境变量：`TUTOR_API_KEY`、`TUTOR_API_BASE_URL`、`TUTOR_TOKEN_BUDGET`。
+### 启动
+
+```bash
+streamlit run app.py
+# → http://localhost:8501
+```
+
+或双击 `run.bat`（Windows）。
 
 ---
 
@@ -84,7 +112,63 @@ npm run dev
 
 ```bash
 python -m pytest tests/ -v
-# 18 passed
+# 148 passed
+```
+
+---
+
+## 项目结构
+
+```
+super-tutor-agent/
+├── app.py                         # Streamlit 主入口
+├── requirements.txt               # Python 依赖
+├── run.bat                        # Windows 一键启动
+├── README.md
+│
+├── super_tutor/
+│   ├── config.py                  # 配置管理
+│   ├── main.py                    # FastAPI 入口（可选）
+│   ├── core/
+│   │   ├── database.py            # 数据库层（6 表）
+│   │   ├── llm_client.py          # LLM 客户端
+│   │   └── exceptions.py          # 异常类
+│   ├── engine/                    # 业务引擎层
+│   │   ├── knowledge_engine.py
+│   │   ├── assessment_engine.py
+│   │   ├── quiz_engine.py
+│   │   ├── plan_engine.py
+│   │   └── socratic_engine.py
+│   ├── models/                    # Pydantic 数据模型
+│   │   ├── enums.py
+│   │   ├── knowledge.py
+│   │   ├── quiz.py
+│   │   ├── assessment.py
+│   │   ├── plan.py
+│   │   └── socratic.py
+│   ├── routes/                    # FastAPI 路由
+│   └── prompts/                   # LLM Prompt 模板
+│       ├── parse_knowledge.md
+│       ├── assessment.md
+│       ├── quiz_gen.md
+│       ├── grade.md
+│       └── socratic.md
+│
+├── tests/                         # 148 个测试
+│   ├── conftest.py
+│   ├── test_knowledge_engine.py
+│   ├── test_assessment.py
+│   ├── test_quiz_engine.py
+│   ├── test_plan.py
+│   ├── test_socratic.py
+│   ├── test_materials.py
+│   ├── test_quizzes.py
+│   └── test_dashboard.py
+│
+└── docs/
+    ├── requirements.md            # 产品需求规格说明书
+    ├── architecture.md            # 技术架构文档
+    └── plan.md                    # 实施计划
 ```
 
 ---
@@ -93,8 +177,9 @@ python -m pytest tests/ -v
 
 | 文档 | 说明 |
 |------|------|
-| [**requirements.md**](docs/requirements.md) | 产品需求规格说明书：项目概述、功能需求（用户故事 + 验收标准）、非功能需求、风险登记册、词汇表 |
-| [**architecture.md**](docs/architecture.md) | 技术架构文档：系统架构图、项目结构、数据模型（7 个核心实体）、API 接口规范（13 个端点）、流水线工作流、SM-2 算法规格、4 层 JSON 防御解析、测试策略 |
+| [requirements.md](docs/requirements.md) | 产品需求规格说明书：功能需求、非功能需求、风险登记册 |
+| [architecture.md](docs/architecture.md) | 技术架构文档：数据库设计、引擎设计、API 规范 |
+| [plan.md](docs/plan.md) | v3.0 实施计划 |
 
 ---
 
