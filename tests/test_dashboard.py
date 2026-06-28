@@ -163,9 +163,3 @@ class TestDashboard:
         assert total >= 1
         for r in rows:
             assert r["resolution_status"] == "resolved"
-
-    async def test_today_items_empty(self, test_db):
-        """get_today_items should return empty for student without plan."""
-        today = datetime.now(timezone.utc).date().isoformat()
-        items = await test_db.get_today_items("student-x", today)
-        assert items == []

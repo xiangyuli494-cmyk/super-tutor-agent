@@ -118,7 +118,7 @@ class SocraticEngine:
         user_prompt = self._build_start_prompt(kp_data, wrong_data)
 
         # -- 3. Call LLM ------------------------------------------------------
-        raw_json = await self._call_llm(user_prompt, expect_start=True)
+        raw_json = await self._call_llm(user_prompt)
 
         # -- 4. Parse & return ------------------------------------------------
         turn = self._parse_turn(raw_json, kp_id, wrong_question_id)
@@ -167,7 +167,7 @@ class SocraticEngine:
 
         # -- 1. Check for explicit "show answer" request ---------------------
         if self._is_show_answer_request(user_response):
-            return self._build_show_answer_turn(history, user_response)
+            return self._build_show_answer_turn(history)
 
         # -- 2. Check for max turns exceeded ---------------------------------
         if len(history) >= _MAX_DIALOGUE_TURNS:
@@ -193,7 +193,7 @@ class SocraticEngine:
         )
 
         # -- 6. Call LLM ------------------------------------------------------
-        raw_json = await self._call_llm(user_prompt, expect_start=False)
+        raw_json = await self._call_llm(user_prompt)
 
         # -- 7. Parse & return ------------------------------------------------
         turn = self._parse_turn(raw_json, kp_id, wrong_question_id)
@@ -308,13 +308,12 @@ class SocraticEngine:
     # ==================================================================
 
     async def _call_llm(
-        self, user_prompt: str, expect_start: bool = False
+        self, user_prompt: str
     ) -> str:
         """Call the LLM with the socratic system prompt and user context.
 
         Args:
             user_prompt: The formatted user prompt.
-            expect_start: If True, prepend instruction to start at L1.
 
         Returns:
             Raw LLM response text (JSON string).
@@ -405,7 +404,6 @@ class SocraticEngine:
     def _build_show_answer_turn(
         self,
         history: list[dict[str, Any]],
-        user_response: str,
     ) -> SocraticTurn:
         """Build a SHOW_ANSWER turn directly (no LLM needed for detection).
 
@@ -460,7 +458,7 @@ class SocraticEngine:
             + "\n\n**注意：已达到最大对话轮数，请直接以 SHOW_ANSWER 层级给出完整解析。**"
         )
 
-        raw_json = await self._call_llm(user_prompt, expect_start=False)
+        raw_json = await self._call_llm(user_prompt)
         return self._parse_turn(raw_json, kp_id, wrong_question_id)
 
 

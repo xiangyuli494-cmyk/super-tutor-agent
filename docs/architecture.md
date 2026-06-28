@@ -1,337 +1,273 @@
-# 超级私教 (Super Tutor) — 技术架构文档
+# Super Tutor — 技术架构文档
 
-**文档编号：** STA-ARCH-2026-003
-**版本：** v3.0
+**版本：** v3.2
 **状态：** 已实现
-**密级：** 内部
+**最后更新：** 2026-06-26
+
+配套文档：[产品需求规格说明书](requirements.md)
 
 ---
 
-## 文档说明
-
-本文档描述 v3.0 重构的目标架构。核心变化：
-
-| 维度 | v2.0（当前代码） | v3.0（目标） |
-|------|-----------------|-------------|
-| 前端 | React + Vite + Tailwind + Zustand | **Streamlit** |
-| 编排引擎 | Orchestrator 状态机 (~2,200 行) | **去掉**，页面按钮驱动 |
-| AI 角色 | Tutor / Assistant / Evaluator (3 角色) | **去掉**，每次调用直接构建 Prompt |
-| 数据库表 | 14 张 | **精简为 6 张**（知识点为核心） |
-| 启动方式 | 两个终端（uvicorn + vite） | **一个命令**（`streamlit run`） |
-
-**配套文档：**
-- 产品需求 → [requirements.md](requirements.md) (v5.0)
-
----
-
-## 第 1 章 · 现有文件处置清单
-
-以当前项目根目录 `super-tutor-agent/` 为准，逐文件说明。
-
-### 1.1 删除的文件
-
-```
-frontend/                          # 整个目录移除（React SPA）
-├── index.html
-├── package.json
-├── package-lock.json
-├── postcss.config.js
-├── tailwind.config.js
-├── tsconfig.json
-├── vite.config.ts
-├── dist/
-├── node_modules/
-└── src/
-    ├── main.tsx
-    ├── App.tsx
-    ├── index.css
-    ├── api/client.ts
-    ├── api/types.ts
-    ├── store/quizStore.ts
-    ├── store/studentStore.ts
-    ├── pages/Dashboard.tsx
-    ├── pages/MaterialsPage.tsx
-    ├── pages/QuizPage.tsx
-    ├── pages/ResultsPage.tsx
-    ├── pages/PlanPage.tsx
-    └── components/{Layout,Navbar,FileUpload,QuizCard,ResultCard,MasteryChart}.tsx
-
-super_tutor/core/orchestrator.py          # 状态机主类 (~900 行)
-super_tutor/core/orchestrator_phases.py   # 四阶段 Mixin (~760 行)
-super_tutor/core/orchestrator_prompts.py  # Prompt 构建 (~280 行)
-super_tutor/core/orchestrator_utils.py    # JSON 解析+水合 (~260 行)
-super_tutor/core/role_manager.py          # 角色管理器
-super_tutor/core/token_tracker.py         # Token 追踪器
-super_tutor/core/limiter.py               # 限流器 (Streamlit 不需要)
-super_tutor/core/cli_backend.py           # Claude CLI 回退（不再需要）
-
-super_tutor/routes/dependencies.py        # 依赖注入（OrchestratorRegistry 等）
-super_tutor/routes/quizzes.py             # 测验路由（依赖 Orchestrator）
-super_tutor/routes/tokens.py              # Token 统计路由
-
-super_tutor/prompts/tutor.md              # 角色 Prompt（不再需要角色系统）
-super_tutor/prompts/assistant.md          # 角色 Prompt
-super_tutor/prompts/evaluator.md          # 角色 Prompt
-
-tests/test_tokens.py                      # Token 测试（不再需要）
-```
-
-### 1.2 保留并修改的文件
-
-| 文件 | 修改内容 |
-|------|---------|
-| `requirements.txt` | 去掉 `slowapi`、`sqlite-vec`；新增 `streamlit` |
-| `super_tutor/main.py` | 去掉 Orchestrator/limiter/role 相关导入；简化 lifespan |
-| `super_tutor/config.py` | 去掉 `model_heavy/medium/light`、`token_budget`、`prompt_versions` |
-| `super_tutor/core/database.py` | 14 表 → 5 表；去掉 vector/embedding 逻辑 |
-| `super_tutor/core/llm_client.py` | 去掉 `token_tracker` 参数；简化接口 |
-| `super_tutor/core/exceptions.py` | 去掉 `SessionError` 及子类；新增 `NoKnowledgePoints` |
-| `super_tutor/models/enums.py` | 去掉 `AIRole`、`PipelinePhase`、`WorkflowState`、`MasteryState`、`MisconceptionCategory` |
-| `super_tutor/models/knowledge.py` | 保留 `KnowledgeChunk`，新增 `KnowledgePoint`（含前后依赖字段）；KnowledgeNode/Edge/Graph 可保留 |
-| `super_tutor/models/quiz.py` | 保留 `Question`/`QuizAttempt`；去掉 `QuizSession`/`SocraticHint`；新增 `WrongQuestion` |
-| `super_tutor/models/mastery.py` | 内容合并到 `knowledge.py` 的 `KnowledgePoint.mastery_level` 字段 |
-| `super_tutor/routes/materials.py` | 去掉 Orchestrator 依赖；简化上传逻辑 |
-| `super_tutor/routes/dashboard.py` | 去掉 Orchestrator 依赖；精简查询 |
-| `super_tutor/routes/schemas.py` | 去掉 Session/Orchestrator 相关 DTO；新增错题本相关 DTO |
-| `tests/conftest.py` | 去掉 Orchestrator/FakeLLM 相关 fixture |
-| `tests/test_materials.py` | 适配简化后的路由 |
-| `tests/test_quizzes.py` | 适配简化后的出题/判题流程 |
-| `tests/test_dashboard.py` | 适配简化后的查询 |
-
-### 1.3 新增的文件
-
-```
-app.py                              # Streamlit 主入口（单文件应用）
-super_tutor/engine/                 # 业务逻辑层（替代 orchestrator）
-├── __init__.py
-├── knowledge_engine.py             # 知识点解析 + 前后关联
-├── assessment_engine.py            # 诊断评估
-├── quiz_engine.py                  # 出题 + 判题
-├── plan_engine.py                  # 学习计划（拓扑排序）
-└── socratic_engine.py              # 苏格拉底追问
-super_tutor/prompts/                # Prompt 模板（重写，按功能而非角色）
-├── parse_knowledge.md              # 知识点解析
-├── assessment.md                   # 诊断评估
-├── quiz_gen.md                     # 出题
-├── grade.md                        # 判题
-└── socratic.md                     # 苏格拉底追问
-```
-
----
-
-## 第 2 章 · 目标项目结构
+## 第 1 章 · 项目结构
 
 ```
 super-tutor-agent/
-├── app.py                           # Streamlit 主入口
-├── requirements.txt                 # Python 依赖（精简后）
-├── pytest.ini
+├── app.py                         # Streamlit 前端入口（~1970 行）
+├── requirements.txt               # Python 依赖
 ├── README.md
 │
-├── super_tutor/                     # 后端逻辑库
-│   ├── __init__.py                  # 保留，更新 __version__
-│   ├── config.py                    # 保留，精简
-│   ├── main.py                      # 保留 FastAPI（可选，供未来 API 扩展）
-│   │
-│   ├── core/                        # 基础设施
-│   │   ├── __init__.py
-│   │   ├── database.py              # 改写：5 表，无向量
-│   │   ├── llm_client.py            # 保留，去 token_tracker 参数
-│   │   └── exceptions.py            # 保留，精简异常类
-│   │
-│   ├── engine/                      # 新增：业务引擎层
-│   │   ├── __init__.py
-│   │   ├── knowledge_engine.py
-│   │   ├── assessment_engine.py
-│   │   ├── quiz_engine.py
-│   │   ├── plan_engine.py
-│   │   └── socratic_engine.py
-│   │
-│   ├── models/                      # Pydantic 模型（保留，修改）
-│   │   ├── __init__.py
-│   │   ├── enums.py                 # 精简枚举
-│   │   ├── knowledge.py             # 修改：+KnowledgePoint
-│   │   ├── quiz.py                  # 修改：+WrongQuestion, -QuizSession
-│   │   └── plan.py                  # 保留，简化
-│   │
-│   ├── routes/                      # FastAPI 路由（保留，简化）
-│   │   ├── __init__.py
-│   │   ├── schemas.py               # 精简 DTO
-│   │   ├── materials.py             # 简化
-│   │   ├── dashboard.py             # 简化
-│   │   └── quizzes.py               # 重写：去 Orchestrator 依赖
-│   │
-│   └── prompts/                     # Prompt 模板
-│       ├── parse_knowledge.md       # 新增
-│       ├── assessment.md            # 新增
-│       ├── quiz_gen.md              # 新增
-│       ├── grade.md                 # 新增
-│       └── socratic.md              # 新增
-│
-├── tests/                           # 测试
+├── super_tutor/
 │   ├── __init__.py
-│   ├── conftest.py                  # 精简 fixtures
-│   ├── test_knowledge_engine.py     # 新增
-│   ├── test_quiz_engine.py          # 新增
-│   ├── test_materials.py            # 修改
-│   └── test_dashboard.py            # 修改
+│   ├── config.py                  # 配置管理（4 字段）
+│   │
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── database.py            # SQLite 6 表 + 25+ CRUD 方法
+│   │   ├── llm_client.py          # DeepSeek API 客户端（OpenAI SDK 封装）
+│   │   └── exceptions.py          # 异常类（TutorError / LLMError / MaterialError）
+│   │
+│   ├── engine/
+│   │   ├── __init__.py
+│   │   ├── knowledge_engine.py    # 知识点解析 + 前驱/后继关系管理
+│   │   ├── assessment_engine.py   # 诊断评估 + 3 条前置规则
+│   │   ├── quiz_engine.py         # 出题 + 程序/LLM 混合批改 + 错题入库
+│   │   ├── plan_engine.py         # 拓扑排序 + 优先级公式 + 学习计划
+│   │   └── socratic_engine.py     # 苏格拉底追问（L1→L2→L3）
+│   │
+│   ├── models/
+│   │   ├── __init__.py            # 统一导出
+│   │   ├── enums.py               # DifficultyLevel + QuestionType
+│   │   ├── knowledge.py           # KnowledgePoint
+│   │   ├── quiz.py                # Question + QuizAttempt
+│   │   ├── assessment.py          # AssessmentReport + KPAssessmentResult
+│   │   ├── mastery.py             # ReviewItem
+│   │   ├── plan.py                # StudyPlan
+│   │   └── socratic.py            # SocraticTurn + helpers
+│   │
+│   └── prompts/                   # LLM Prompt 模板
+│       ├── parse_knowledge.md     # 知识点解析
+│       ├── assessment.md          # 诊断评估出题
+│       ├── quiz_gen.md            # 练习出题
+│       ├── grade.md               # 批改
+│       └── socratic.md            # 苏格拉底追问
+│
+├── tests/                         # 测试（8 文件）
+│   ├── conftest.py                # fixtures: test_db, test_db_path
+│   ├── test_knowledge_engine.py
+│   ├── test_assessment.py
+│   ├── test_quiz_engine.py
+│   ├── test_plan.py
+│   ├── test_socratic.py
+│   ├── test_materials.py
+│   ├── test_quizzes.py
+│   └── test_dashboard.py
 │
 └── docs/
-    ├── requirements.md              # v5.0
-    ├── architecture.md              # v3.0（本文档）
-    └── PRD.md                       # 历史引用
+    ├── requirements.md            # 产品需求规格说明书
+    ├── architecture.md            # 本文档
+    └── plan.md                    # 实施计划（历史记录）
 ```
 
 ---
 
-## 第 3 章 · 数据库设计（从 14 表 → 6 表）
+## 第 2 章 · 数据库设计
 
-**文件：** `super_tutor/core/database.py`（重写）
+**文件：** `super_tutor/core/database.py`
+**引擎：** SQLite + aiosqlite 异步 I/O，WAL 模式
 
-### 3.1 现有表的处理
+### 2.1 表总览（6 表）
 
-| 现有表 | 处置 | 原因 |
-|--------|------|------|
-| `materials` | **保留**，保留 `material_id`/`title`/`content`/`course_type`/`status`，去 `subject`/`description` | 记录上传来源 |
-| `knowledge_chunks` | **改为 `knowledge_points`** | 知识点即核心实体，增加前后依赖字段 |
-| `questions` | **保留**，增加 `kp_id`、`kp_context`，去 `session_id`/`knowledge_node_ids` | 题库 |
-| `quiz_attempts` | **保留**，增加 `kp_id` | 作答记录 |
-| `sessions` | **删除** | 无状态机，不需要会话 |
-| `mastery_records` | **删除**（字段合并到 `knowledge_points`） | 掌握度是知识点的属性 |
-| `study_plans` | **保留**，简化 | 学习计划 |
-| `review_items` | **删除**（合并到 `study_plans.kp_sequence`） | 计划直接关联 KP |
-| `socratic_hints` | **删除**（LLM 实时生成） | 不持久化 |
-| `projects`/`artifacts`/`task_log`/`token_usage`/`git_commits` | **删除** | Codex CLI 模板遗留，与教学无关 |
+| 表名 | 用途 | 核心列 |
+|------|------|--------|
+| `materials` | 学习材料 | material_id, title, content, course_type, status |
+| `knowledge_points` | 知识点（核心实体） | kp_id, prerequisite_ids, successor_ids, mastery_level |
+| `questions` | 题库 | question_id, kp_id, type, stem, correct_answer |
+| `quiz_attempts` | 作答记录 | attempt_id, student_id, question_id, kp_id, is_correct |
+| `wrong_questions` | 错题本 | wrong_id, student_id, question_id, kp_id, resolution_status |
+| `study_plans` | 学习计划 | plan_id, student_id, kp_sequence |
 
-### 3.2 目标 6 表
-
-#### `materials` — 学习材料
+### 2.2 materials — 学习材料
 
 ```sql
-CREATE TABLE materials (
-    material_id TEXT PRIMARY KEY,
-    title       TEXT NOT NULL,
-    content     TEXT NOT NULL DEFAULT '',
-    course_type TEXT NOT NULL DEFAULT '',
-    status      TEXT NOT NULL DEFAULT 'draft',  -- draft / processing / ready / error
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS materials (
+    material_id  TEXT PRIMARY KEY,
+    title        TEXT    NOT NULL,
+    content      TEXT    NOT NULL DEFAULT '',
+    course_type  TEXT    NOT NULL DEFAULT '',
+    status       TEXT    NOT NULL DEFAULT 'draft',   -- draft / processing / ready / error
+    created_at   TEXT    NOT NULL,
+    updated_at   TEXT    NOT NULL
 );
 ```
 
-> 相比现有：去掉 `subject`、`description`。新增 `course_type`。
+CRUD：`create_material` / `get_material` / `update_material`
 
-#### `knowledge_points` — 知识点（核心表）
+### 2.3 knowledge_points — 知识点（核心）
 
 ```sql
-CREATE TABLE knowledge_points (
-    kp_id             TEXT PRIMARY KEY,
-    material_id       TEXT NOT NULL,
-    title             TEXT NOT NULL,
-    summary           TEXT NOT NULL DEFAULT '',
-    content           TEXT NOT NULL,
-    keywords          TEXT NOT NULL DEFAULT '[]',        -- JSON
-    difficulty        TEXT NOT NULL DEFAULT 'medium',
-    course_type       TEXT NOT NULL DEFAULT '',
-    chapter_index     INTEGER NOT NULL DEFAULT 0,
-    prerequisite_ids  TEXT NOT NULL DEFAULT '[]',        -- JSON [kp_id, ...]
-    successor_ids     TEXT NOT NULL DEFAULT '[]',        -- JSON [kp_id, ...]
-    mastery_level     REAL NOT NULL DEFAULT 0.0,
-    assessment_count  INTEGER NOT NULL DEFAULT 0,
-    created_at        TEXT NOT NULL,
-    updated_at        TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS knowledge_points (
+    kp_id            TEXT PRIMARY KEY,
+    material_id      TEXT    NOT NULL,
+    title            TEXT    NOT NULL,
+    summary          TEXT    NOT NULL DEFAULT '',
+    content          TEXT    NOT NULL,
+    keywords         TEXT    NOT NULL DEFAULT '[]',         -- JSON array
+    difficulty       TEXT    NOT NULL DEFAULT 'medium',
+    course_type      TEXT    NOT NULL DEFAULT '',
+    chapter_index    INTEGER NOT NULL DEFAULT 0,
+    prerequisite_ids TEXT    NOT NULL DEFAULT '[]',         -- JSON array of kp_id
+    successor_ids    TEXT    NOT NULL DEFAULT '[]',         -- JSON array of kp_id
+    mastery_level    REAL    NOT NULL DEFAULT 0.0,
+    assessment_count INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT    NOT NULL,
+    updated_at       TEXT    NOT NULL
 );
-
-CREATE INDEX idx_kp_course ON knowledge_points(course_type);
-CREATE INDEX idx_kp_material ON knowledge_points(material_id);
+CREATE INDEX IF NOT EXISTS idx_kp_material_id ON knowledge_points(material_id);
+CREATE INDEX IF NOT EXISTS idx_kp_title        ON knowledge_points(title);
+CREATE INDEX IF NOT EXISTS idx_kp_difficulty   ON knowledge_points(difficulty);
 ```
 
-> 相比现有的 `knowledge_chunks`：新增 `prerequisite_ids`、`successor_ids`、`mastery_level`、`course_type`；去掉 `embedding`、`page_start`/`page_end`、`metadata`。
+CRUD：`insert_knowledge_point` / `get_knowledge_point` / `list_knowledge_points_by_material` / `list_knowledge_points_with_mastery` / `update_knowledge_point` / `upsert_knowledge_point_mastery`
 
-#### `questions` — 题库
+### 2.4 questions — 题库
 
 ```sql
-CREATE TABLE questions (
-    question_id    TEXT PRIMARY KEY,
-    kp_id          TEXT NOT NULL,
-    type           TEXT NOT NULL,              -- multiple_choice / true_false / fill_in_blank
-    difficulty     TEXT NOT NULL DEFAULT 'medium',
-    stem           TEXT NOT NULL,
-    options        TEXT NOT NULL DEFAULT '[]', -- JSON
-    correct_answer TEXT NOT NULL,
-    explanation    TEXT NOT NULL DEFAULT '',
-    kp_context     TEXT NOT NULL DEFAULT '[]', -- JSON [前驱KP摘要...]
-    created_at     TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS questions (
+    question_id        TEXT PRIMARY KEY,
+    type               TEXT    NOT NULL,            -- multiple_choice / true_false / fill_in_blank / short_answer / essay / coding
+    difficulty         TEXT    NOT NULL DEFAULT 'medium',
+    subject            TEXT    NOT NULL DEFAULT '',
+    topic              TEXT    NOT NULL DEFAULT '',
+    stem               TEXT    NOT NULL,
+    options            TEXT    NOT NULL DEFAULT '[]',  -- JSON
+    correct_answer     TEXT    NOT NULL,
+    explanation        TEXT    NOT NULL DEFAULT '',
+    kp_id              TEXT    NOT NULL DEFAULT '',
+    kp_context         TEXT    NOT NULL DEFAULT '',
+    estimated_seconds  INTEGER NOT NULL DEFAULT 120,
+    points             REAL    NOT NULL DEFAULT 1.0,
+    tags               TEXT    NOT NULL DEFAULT '[]',  -- JSON
+    metadata           TEXT    NOT NULL DEFAULT '{}',  -- JSON
+    created_at         TEXT    NOT NULL
 );
-
-CREATE INDEX idx_q_kp ON questions(kp_id);
+CREATE INDEX IF NOT EXISTS idx_questions_topic      ON questions(topic);
+CREATE INDEX IF NOT EXISTS idx_questions_difficulty ON questions(difficulty);
+CREATE INDEX IF NOT EXISTS idx_questions_type       ON questions(type);
+CREATE INDEX IF NOT EXISTS idx_questions_kp_id      ON questions(kp_id);
 ```
 
-> 相比现有：新增 `kp_id`（直接关联知识点）；新增 `kp_context`（记录注入的上下文）；去掉 `session_id`/`knowledge_node_ids`/`chunk_ids`/`subject`/`topic`/`tags`/`metadata`/`estimated_seconds`/`points`。
+CRUD：`insert_question`（INSERT OR REPLACE） / `get_question`
 
-#### `quiz_attempts` — 作答记录
+### 2.5 quiz_attempts — 作答记录
 
 ```sql
-CREATE TABLE quiz_attempts (
-    attempt_id         TEXT PRIMARY KEY,
-    student_id         TEXT NOT NULL DEFAULT 'default',
-    question_id        TEXT NOT NULL,
-    kp_id              TEXT NOT NULL,
-    student_answer     TEXT,
-    is_correct         INTEGER,
+CREATE TABLE IF NOT EXISTS quiz_attempts (
+    attempt_id        TEXT PRIMARY KEY,
+    student_id        TEXT    NOT NULL DEFAULT '',
+    question_id       TEXT    NOT NULL,
+    kp_id             TEXT    NOT NULL DEFAULT '',
+    student_answer    TEXT,
+    is_correct        INTEGER,                      -- NULL=未批改, 0=错, 1=对
+    score             REAL,
     time_spent_seconds INTEGER NOT NULL DEFAULT 0,
-    created_at         TEXT NOT NULL
+    hints_used        INTEGER NOT NULL DEFAULT 0,
+    attempt_number    INTEGER NOT NULL DEFAULT 1,
+    confidence        REAL,
+    misconception_ids TEXT    NOT NULL DEFAULT '[]',
+    note              TEXT    NOT NULL DEFAULT '',
+    started_at        TEXT    NOT NULL,
+    submitted_at      TEXT,
+    metadata          TEXT    NOT NULL DEFAULT '{}'
 );
-
-CREATE INDEX idx_qa_student ON quiz_attempts(student_id);
-CREATE INDEX idx_qa_kp ON quiz_attempts(kp_id);
+CREATE INDEX IF NOT EXISTS idx_attempts_student_id   ON quiz_attempts(student_id);
+CREATE INDEX IF NOT EXISTS idx_attempts_question_id  ON quiz_attempts(question_id);
+CREATE INDEX IF NOT EXISTS idx_attempts_is_correct   ON quiz_attempts(is_correct);
+CREATE INDEX IF NOT EXISTS idx_attempts_kp_id        ON quiz_attempts(kp_id);
 ```
 
-> 相比现有：新增 `kp_id`（冗余，方便按知识点查询）；去掉 `session_id`/`score`/`hints_used`/`attempt_number`/`confidence`/`misconception_ids`/`note`。
+CRUD：`insert_attempt`（INSERT OR REPLACE） / `list_attempts_by_student`（支持 is_correct + kp_id 过滤 + 分页）
 
-#### `wrong_questions` — 错题本（新表）
+### 2.6 wrong_questions — 错题本
 
 ```sql
-CREATE TABLE wrong_questions (
-    wq_id         TEXT PRIMARY KEY,
-    student_id    TEXT NOT NULL DEFAULT 'default',
-    question_id   TEXT NOT NULL,
-    kp_id         TEXT NOT NULL,
-    attempt_id    TEXT NOT NULL,
-    wrong_count   INTEGER NOT NULL DEFAULT 1,
-    is_reviewed   INTEGER NOT NULL DEFAULT 0,
-    last_wrong_at TEXT NOT NULL,
-    created_at    TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS wrong_questions (
+    wrong_id          TEXT PRIMARY KEY,
+    student_id        TEXT    NOT NULL,
+    question_id       TEXT    NOT NULL,
+    kp_id             TEXT    NOT NULL DEFAULT '',
+    wrong_answer      TEXT,
+    correct_answer    TEXT    NOT NULL,
+    attempt_count     INTEGER NOT NULL DEFAULT 1,
+    resolution_status TEXT    NOT NULL DEFAULT 'unresolved',  -- unresolved / reviewing / resolved
+    note              TEXT    NOT NULL DEFAULT '',
+    created_at        TEXT    NOT NULL,
+    updated_at        TEXT    NOT NULL
 );
-
-CREATE INDEX idx_wq_student ON wrong_questions(student_id);
-CREATE INDEX idx_wq_kp ON wrong_questions(kp_id);
+CREATE INDEX IF NOT EXISTS idx_wrong_student_id   ON wrong_questions(student_id);
+CREATE INDEX IF NOT EXISTS idx_wrong_question_id  ON wrong_questions(question_id);
+CREATE INDEX IF NOT EXISTS idx_wrong_kp_id        ON wrong_questions(kp_id);
+CREATE INDEX IF NOT EXISTS idx_wrong_resolution   ON wrong_questions(resolution_status);
 ```
 
-#### `study_plans` — 学习计划（保留简化）
+去重策略：同一 student_id + question_id → 递增 attempt_count，不新建行。
+
+CRUD：`insert_wrong_question` / `get_wrong_question` / `get_wrong_question_by_student_and_question` / `list_wrong_questions_by_student`（支持 resolution_status 过滤 + 分页） / `update_wrong_question`
+
+### 2.7 study_plans — 学习计划
 
 ```sql
-CREATE TABLE study_plans (
-    plan_id     TEXT PRIMARY KEY,
-    student_id  TEXT NOT NULL DEFAULT 'default',
-    title       TEXT NOT NULL DEFAULT '',
-    kp_sequence TEXT NOT NULL DEFAULT '[]',  -- JSON [kp_id, ...] 拓扑排序后的序列
-    status      TEXT NOT NULL DEFAULT 'active',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS study_plans (
+    plan_id      TEXT PRIMARY KEY,
+    student_id   TEXT    NOT NULL,
+    title        TEXT    NOT NULL DEFAULT '',
+    description  TEXT    NOT NULL DEFAULT '',
+    goal         TEXT    NOT NULL DEFAULT '',
+    start_date   TEXT    NOT NULL,
+    end_date     TEXT,
+    status       TEXT    NOT NULL DEFAULT 'active',
+    kp_sequence  TEXT    NOT NULL DEFAULT '[]',       -- JSON: [{kp_id, title, order, priority_score, mastery, activity_type, estimated_minutes, scheduled_date, completed, ...}]
+    metadata     TEXT    NOT NULL DEFAULT '{}',
+    created_at   TEXT    NOT NULL,
+    updated_at   TEXT    NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_study_plans_student_id ON study_plans(student_id);
 ```
 
-> 相比现有：新增 `kp_sequence`（替代 `review_items` 表）；去掉 `description`/`subject`/`goal`/`start_date`/`end_date`/`metadata`。
+CRUD：`create_study_plan` / `get_study_plan`
 
 ---
 
-## 第 4 章 · 枚举精简
+## 第 3 章 · 配置管理
 
-**文件：** `super_tutor/models/enums.py`
+**文件：** `super_tutor/config.py`
 
 ```python
-# === 保留 ===
+@dataclass
+class TutorConfig:
+    api_key: str = ""
+    api_base_url: str = "https://api.deepseek.com"
+    db_path: str = "~/.super-tutor/super_tutor.db"
+    model: str = "deepseek-chat"
+```
+
+加载优先级：**环境变量 > `~/.super-tutor/settings.json` > 默认值**
+
+| 环境变量 | 映射字段 |
+|---------|---------|
+| `TUTOR_API_KEY` | api_key |
+| `TUTOR_API_BASE_URL` | api_base_url |
+| `TUTOR_DB_PATH` | db_path |
+| `TUTOR_MODEL` | model |
+
+`LLMClient` 额外从环境变量读取 `TUTOR_MAX_RETRIES`（默认 3）。
+
+---
+
+## 第 4 章 · 数据模型
+
+### 4.1 枚举（`models/enums.py`）
+
+```python
 class DifficultyLevel(str, Enum):
     BEGINNER = "beginner"
     EASY = "easy"
@@ -346,71 +282,32 @@ class QuestionType(str, Enum):
     SHORT_ANSWER = "short_answer"
     ESSAY = "essay"
     CODING = "coding"
-
-# === 删除 ===
-# AIRole, PipelinePhase/WorkflowState, QuizStatus, MasteryState,
-# MisconceptionCategory — 全部删除
-
-# === 新增 ===
-class CourseType(str, Enum):
-    COMPUTER_SCIENCE = "computer_science"
-    MATH = "math"
-    PHYSICS = "physics"
-    CHEMISTRY = "chemistry"
-    ENGLISH = "english"
-    CUSTOM = "custom"
-
-class PlanStatus(str, Enum):
-    ACTIVE = "active"
-    COMPLETED = "completed"
 ```
+
+### 4.2 Pydantic 模型
+
+| 模型 | 文件 | 对应表 | 核心字段 |
+|------|------|--------|---------|
+| `KnowledgePoint` | knowledge.py | knowledge_points | kp_id, title, content, prerequisite_ids, successor_ids, mastery_level |
+| `Question` | quiz.py | questions | question_id, type, stem, correct_answer, kp_id, hints |
+| `QuizAttempt` | quiz.py | quiz_attempts | attempt_id, question_id, student_answer, is_correct, kp_id |
+| `KPAssessmentResult` | assessment.py | —（内存） | kp_id, accuracy, initial_mastery, adjusted_mastery, status |
+| `AssessmentReport` | assessment.py | —（内存） | kp_results, accuracy, weak_kps, strong_kps, rules_applied |
+| `ReviewItem` | mastery.py | study_plans.kp_sequence | knowledge_node_id, scheduled_date, activity_type, estimated_minutes |
+| `StudyPlan` | plan.py | study_plans | plan_id, kp_sequence, schedule: list[ReviewItem], progress |
+| `SocraticTurn` | socratic.py | —（session_state） | turn_id, level, teacher_message, expected_concepts, resolved |
 
 ---
 
-## 第 5 章 · 配置精简
+## 第 5 章 · LLM 客户端
 
-**文件：** `super_tutor/config.py`（修改）
-
-| 配置键 | 保留？ | 说明 |
-|--------|:---:|------|
-| `api_key` | ✅ | DeepSeek API Key |
-| `api_base_url` | ✅ | API 地址 |
-| `db_path` | ✅ | SQLite 路径 |
-| `max_retries` | ✅ | 重试次数 |
-| `request_timeout` | ✅ | 超时 |
-| `token_budget` | ❌ | 不再追踪 Token 预算 |
-| `model_heavy` | ❌ | 不再分档，统一用 `model` |
-| `model_medium` | ❌ | 同上 |
-| `model_light` | ❌ | 同上 |
-
-简化后：
-
-```python
-@dataclass
-class TutorConfig:
-    api_key: str = ""
-    api_base_url: str = "https://api.deepseek.com"
-    db_path: str = "~/.super-tutor/super_tutor.db"
-    model: str = "deepseek-chat"
-    max_retries: int = 3
-    request_timeout: int = 120
-```
-
----
-
-## 第 6 章 · LLM 客户端精简
-
-**文件：** `super_tutor/core/llm_client.py`（修改）
-
-保留核心接口，去掉 `token_tracker` 参数：
+**文件：** `super_tutor/core/llm_client.py`
 
 ```python
 class LLMClient:
-    def __init__(self, config: TutorConfig):
-        self._client = OpenAI(
-            api_key=config.api_key,
-            base_url=config.api_base_url,
-        )
+    def __init__(self):
+        # 从环境变量读取: TUTOR_API_KEY, TUTOR_API_BASE_URL, TUTOR_MODEL, TUTOR_MAX_RETRIES
+        self._client = AsyncOpenAI(api_key=..., base_url=...)
 
     async def chat(
         self,
@@ -419,504 +316,275 @@ class LLMClient:
         max_tokens: int = 4096,
         timeout: int = 120,
     ) -> str:
-        ...
+        # 3 次指数退避重试（1s → 2s → 4s）
+        # 空内容 → 直接抛出 LLMError（不重试）
+        # Timeout → 重试
 ```
 
-重试策略保留（3 次指数退避）。
+重试策略：初始尝试 + 3 次重试，指数退避。`LLMError`（空内容）不重试，立即传播。
 
 ---
 
-## 第 7 章 · 业务引擎层（新增，替代 Orchestrator）
+## 第 6 章 · 业务引擎层
 
-**目录：** `super_tutor/engine/`
+5 个无状态 Engine，构造函数接收 `Database`，除 `PlanEngine` 外均需 `LLMClient`。
 
-每个 Engine 是一组无状态的异步函数，直接操作 `Database` 和 `LLMClient`。没有状态机，没有角色切换。
-
-### 7.1 KnowledgeEngine — 知识点解析与前后关联
+### 6.1 KnowledgeEngine — 知识点解析
 
 ```python
 class KnowledgeEngine:
-    def __init__(self, db: Database, llm: LLMClient): ...
+    def __init__(self, db: Database, llm_client: LLMClient, parse_prompt_path: str | None = None):
+        ...
 
-    async def parse(
-        self, content: str, course_type: str, material_id: str
-    ) -> list[KnowledgePoint]:
-        """1. 调 LLM 拆分知识点 (title/summary/keywords/difficulty)
-           2. 识别 prerequisite/successor 关系 (按 title 匹配 → 转 kp_id)
-           3. 批量写入 knowledge_points 表
-           4. 双向更新 prerequisite_ids / successor_ids
-        """
+    async def parse(self, content: str, course_type: str, material_id: str) -> list[KnowledgePoint]:
+        """1. 加载 parse_knowledge.md prompt
+           2. 调用 LLM 拆分知识点
+           3. 解析 JSON，生成 UUID
+           4. 根据 prerequisite_indices 建立双向关系
+           5. 批量写入 knowledge_points 表"""
 
     async def get_by_material(self, material_id: str) -> list[KnowledgePoint]: ...
-    async def get_by_course(self, course_type: str) -> list[KnowledgePoint]: ...
     async def get_prerequisites(self, kp_id: str) -> list[KnowledgePoint]: ...
     async def get_successors(self, kp_id: str) -> list[KnowledgePoint]: ...
     async def update_mastery(self, kp_id: str, score: float) -> None: ...
 ```
 
-### 7.2 AssessmentEngine — 诊断评估
+### 6.2 AssessmentEngine — 诊断评估
 
 ```python
 class AssessmentEngine:
-    def __init__(self, db: Database, llm: LLMClient): ...
+    def __init__(self, db: Database, llm_client: LLMClient,
+                 knowledge_engine: KnowledgeEngine | None = None,
+                 quiz_engine: QuizEngine | None = None): ...
 
-    async def generate(
-        self, kp_ids: list[str], question_count: int = 15
-    ) -> list[Question]:
-        """每个 KP 至少 1 题，从前驱到后继递进"""
+    async def generate(self, kp_ids: list[str], student_id: str = "",
+                       question_count: int = 15) -> list[Question]:
+        """1. 获取 KP 数据，拓扑排序
+           2. 分配每 KP 题目数（min 1 each）
+           3. 调用 LLM 生成诊断性题目（prompts/assessment.md）
+           4. 解析 JSON 并持久化"""
 
-    async def grade(
-        self, questions: list[Question], answers: dict[str, str]
-    ) -> AssessmentReport:
-        """判题 + 更新 mastery_level + 应用前后联动规则"""
+    async def grade(self, questions: list[Question], student_answers: list[dict],
+                    student_id: str = "") -> AssessmentReport:
+        """1. 委托 QuizEngine 逐题批改
+           2. 错题自动入库
+           3. 按 KP 聚合正确率
+           4. 应用 3 条前置规则
+           5. 生成评估报告"""
 
     def apply_prerequisite_rules(self, report: AssessmentReport) -> None:
-        """规则 1: 前驱未掌握 → 后继置信度降低
-           规则 2: 后继对但前驱错 → 标记 NeedReview
-           规则 3: 连续 3 后继错 → 前驱标记 NeedRelearn
-        """
+        """规则1: 置信度折扣 (×0.7)
+           规则2: need_review 标记
+           规则3: need_relearn + 掌握度折半"""
 ```
 
-### 7.3 QuizEngine — 出题与判题
+### 6.3 QuizEngine — 出题与批改
 
 ```python
 class QuizEngine:
-    def __init__(self, db: Database, llm: LLMClient): ...
+    def __init__(self, db: Database, llm_client: LLMClient,
+                 knowledge_engine: KnowledgeEngine): ...
 
-    async def generate_questions(
-        self, kp_ids: list[str], count: int = 10,
-        difficulty: str = "medium", types: list[str] = None,
-    ) -> list[Question]:
-        """出题时注入前驱知识点上下文 → 提高题目质量"""
+    async def generate_questions(self, kp_ids: list[str], count: int = 5,
+                                  difficulty: str | None = None,
+                                  types: list[str] | None = None) -> list[Question]:
+        """1. 从 DB 获取 KP + 前驱摘要
+           2. 构建上下文 prompt（prompts/quiz_gen.md）
+           3. 调用 LLM 生成题目
+           4. 解析 JSON 并持久化到 questions 表"""
 
-    async def grade_answers(
-        self, questions: list[Question], answers: dict[str, str]
-    ) -> list[QuizAttempt]:
-        """判题 + 自动收录错题到 wrong_questions"""
+    async def grade_answers(self, questions: list[Question],
+                            student_answers: list[dict[str, Any]],
+                            student_id: str = "") -> list[QuizAttempt]:
+        """1. 分流：选择题/判断题 → 程序化批改（_grade_programmatic）
+           2. 填空/简答/论述/编程 → LLM 批改（prompts/grade.md）
+           3. 持久化 attempts"""
 
-    async def add_to_wrong_book(self, attempt: QuizAttempt) -> WrongQuestion: ...
+    async def add_to_wrong_book(self, attempt: QuizAttempt,
+                                 question: Question | None = None) -> dict:
+        """正确跳过；
+           同(student, question)已存在 → 递增 attempt_count；
+           否则 → 新建 wrong_questions 行"""
 ```
 
-### 7.4 PlanEngine — 学习计划
+**程序化批改细节（`_grade_programmatic`）：**
+- 选择题：`student_answer.strip().upper()` vs `correct_answer.strip().upper()`
+- 判断题：支持 true/false/1/0/yes/no/对/错/正确/错误 → bool 比对
+
+### 6.4 PlanEngine — 学习计划
 
 ```python
 class PlanEngine:
     def __init__(self, db: Database): ...
 
-    async def generate(
-        self, kp_ids: list[str], mastery_map: dict[str, float]
-    ) -> StudyPlan:
-        """1. Kahn 拓扑排序 (前驱永远在前后继永远在后)
-           2. 优先级 = (1 - 掌握度) × (1 + 后继数/总数)
-           3. 输出 kp_sequence → 写入 study_plans
-        """
+    async def generate(self, kp_ids: list[str], mastery_map: dict[str, float],
+                       student_id: str = "", plan_title: str = "",
+                       plan_goal: str = "", start_date: str = "") -> StudyPlan:
+        """1. 从 DB 获取 KP
+           2. Kahn 拓扑排序
+           3. 优先级: (1 - mastery) × (1 + successor_count / total_kps)
+           4. 活动类型: learn_new (<0.3) / review (0.3-0.5) / practice (0.5-0.8) / quiz (≥0.8)
+           5. 时长估算: base_difficulty × (0.5 + mastery_gap)，钳位 10-120 min
+           6. 每日一个 KP 排期
+           7. 持久化到 study_plans 表"""
 
-    def topological_sort(self, kps: list[KnowledgePoint]) -> list[str]: ...
+    @staticmethod
+    def topological_sort(kps: list[dict]) -> list[str]:
+        """Kahn 算法，处理环（剩余节点追加末尾）"""
 ```
 
-### 7.5 SocraticEngine — 苏格拉底追问
+### 6.5 SocraticEngine — 苏格拉底追问
 
 ```python
 class SocraticEngine:
-    def __init__(self, db: Database, llm: LLMClient): ...
+    def __init__(self, db: Database, llm_client: LLMClient,
+                 prompt_path: str | None = None): ...
 
-    async def start_dialogue(
-        self, kp_id: str, wrong_question_id: str
-    ) -> SocraticTurn:
-        """初始提问 (L1 层级 — 笼统引导)"""
+    async def start_dialogue(self, kp_id: str, wrong_question_id: str) -> SocraticTurn:
+        """1. 从 DB 获取 KP 内容和错题信息
+           2. 构建 prompt（prompts/socratic.md）
+           3. 始终从 L1_GUIDING 开始"""
 
-    async def continue_dialogue(
-        self, history: list[SocraticTurn], user_response: str
-    ) -> SocraticTurn:
-        """根据回复决定升级(L1→L2→L3)/降级/结束/显示答案"""
+    async def continue_dialogue(self, history: list[dict[str, Any]],
+                                 user_response: str) -> SocraticTurn:
+        """1. 检测"显示答案"请求 → 软确认后再展示
+           2. 检测 ≥6 轮对话 → 强制 SHOW_ANSWER
+           3. 调用 LLM 判断升级/降级/解决
+           4. 返回下一轮 SocraticTurn"""
 ```
 
-苏格拉底对话状态（仅 4 状态，存在 `st.session_state`，不存 DB）：
-
+层级状态机：
 ```
 L1_GUIDING → L2_HINTING → L3_NEAR_ANSWER → RESOLVED
      ↓            ↓              ↓
      └────────────┴──────────────┴──→ SHOW_ANSWER
 ```
 
+对话状态仅存 `st.session_state`，不持久化。
+
 ---
 
-## 第 8 章 · Streamlit 前端设计
+## 第 7 章 · 前端架构
 
-### 8.1 入口：app.py
+**文件：** `app.py`
+**框架：** Streamlit 单页应用，`layout="wide"`
+
+### 7.1 session_state 键（20 个）
 
 ```python
-import streamlit as st
-from super_tutor.config import TutorConfig
-from super_tutor.core.database import Database
-from super_tutor.core.llm_client import LLMClient
-from super_tutor.engine.knowledge_engine import KnowledgeEngine
-from super_tutor.engine.assessment_engine import AssessmentEngine
-from super_tutor.engine.quiz_engine import QuizEngine
-from super_tutor.engine.plan_engine import PlanEngine
-from super_tutor.engine.socratic_engine import SocraticEngine
-
-st.set_page_config(page_title="超级私教", page_icon="🎓", layout="wide")
-
-# ── 初始化（缓存，只执行一次） ──
-@st.cache_resource
-def init_services():
-    config = TutorConfig.from_env()
-    db = Database(config.db_path)
-    llm = LLMClient(config)
-    return {
-        "db": db, "llm": llm,
-        "knowledge": KnowledgeEngine(db, llm),
-        "assessment": AssessmentEngine(db, llm),
-        "quiz": QuizEngine(db, llm),
-        "plan": PlanEngine(db),
-        "socratic": SocraticEngine(db, llm),
-    }
-
-services = init_services()
-
-# ── Sidebar ──
-with st.sidebar:
-    st.title("🎓 超级私教")
-    course_type = st.selectbox(
-        "课程类型",
-        ["计算机科学", "数学", "物理", "化学", "英语", "自定义"]
-    )
-    st.divider()
-    page = st.radio(
-        "导航",
-        ["📚 上传资料", "📝 诊断评估", "📋 学习计划",
-         "✏️ 练习答题", "📕 错题本"],
-    )
-
-# ── 页面路由 ──
-if page == "📚 上传资料":
-    render_upload_page(services, course_type)
-elif page == "📝 诊断评估":
-    render_assessment_page(services)
-elif page == "📋 学习计划":
-    render_plan_page(services)
-elif page == "✏️ 练习答题":
-    render_practice_page(services)
-elif page == "📕 错题本":
-    render_wrong_book_page(services)
+_S_DB = "tutor_db"                          # Database 实例
+_S_LLM = "tutor_llm"                        # LLMClient 实例
+_S_ENGINE = "tutor_engine"                  # KnowledgeEngine 实例
+_S_KPS = "tutor_knowledge_points"           # 解析后的知识点列表
+_S_MATERIAL_ID = "tutor_material_id"        # 当前材料 ID
+_S_PARSE_ERROR = "tutor_parse_error"        # 解析错误信息
+_S_QUIZ_ENGINE = "tutor_quiz_engine"        # QuizEngine 实例
+_S_QUIZ_MODE = "tutor_quiz_mode"            # 是否进入答题模式
+_S_QUESTIONS = "tutor_questions"            # 当前题目列表
+_S_ATTEMPTS = "tutor_attempts"              # 批改结果
+_S_QUIZ_SUBMITTED = "tutor_quiz_submitted"  # 是否已提交
+_S_ASSESSMENT_ENGINE = "tutor_assessment_engine"
+_S_ASSESSMENT_QUESTIONS = "tutor_assessment_questions"
+_S_ASSESSMENT_REPORT = "tutor_assessment_report"
+_S_ASSESSMENT_SUBMITTED = "tutor_assessment_submitted"
+_S_PLAN = "tutor_plan"                      # 当前学习计划
+_S_PLAN_ACTIVE_KP = "tutor_plan_active_kp"  # 计划中正在学习的 KP
+_S_SOCRATIC_ENGINE = "tutor_socratic_engine"
+_S_SOCRATIC_ACTIVE = "tutor_socratic_active"
+_S_SOCRATIC_HISTORY = "tutor_socratic_history"
+_S_SOCRATIC_TURN = "tutor_socratic_turn"
 ```
 
-### 8.2 session_state 设计
-
-```python
-# 跨页面共享状态
-if "material_id" not in st.session_state:
-    st.session_state.material_id = None
-if "knowledge_points" not in st.session_state:
-    st.session_state.knowledge_points = []
-if "assessment_done" not in st.session_state:
-    st.session_state.assessment_done = False
-if "assessment_report" not in st.session_state:
-    st.session_state.assessment_report = None
-if "current_plan" not in st.session_state:
-    st.session_state.current_plan = None
-if "practice_questions" not in st.session_state:
-    st.session_state.practice_questions = []
-if "practice_answers" not in st.session_state:
-    st.session_state.practice_answers = {}
-if "socratic_history" not in st.session_state:
-    st.session_state.socratic_history = []
-```
-
-### 8.3 页面布局示意
-
-#### 📚 上传资料页
+### 7.2 页面标签流
 
 ```
-┌────────────────────────────────────────────────────────┐
-│  📚 上传学习资料                                        │
-│                                                        │
-│  ┌── PDF 上传 ──────────┐  ┌── 粘贴文本 ─────────────┐ │
-│  │  [拖拽或选择文件]      │  │  [textarea]              │ │
-│  │  (≤ 50MB, 文字型PDF)  │  │                          │ │
-│  └───────────────────────┘  └──────────────────────────┘ │
-│                                                        │
-│  [🚀 开始解析]  ← 点击后 spinner "AI 正在提取知识点…"    │
-│                                                        │
-│  ── 解析结果 ──                                        │
-│  ✅ 提取到 15 个知识点                                  │
-│  ┌────┬──────────┬──────┬──────────┬──────────┐       │
-│  │ #  │ 知识点    │ 难度  │ 前驱      │ 后继      │       │
-│  │ 1  │ F=ma     │ easy │ -        │ 动量定理   │       │
-│  │ 2  │ 动量定理  │ med  │ F=ma     │ 动量守恒   │       │
-│  └────┴──────────┴──────┴──────────┴──────────┘       │
-│                                                        │
-│  [✅ 确认，开始诊断评估 →]                               │
-└────────────────────────────────────────────────────────┘
+📥 导入教材（上传 PDF / 粘贴文本）
+    ↓ 解析后
+📋 知识点列表（st.dataframe）
+    ↓ 确认
+[Tab: 📝 练习答题 | 📖 错题本 | 🔬 诊断评估 | 📅 学习计划]
 ```
 
-#### 📝 诊断评估页
+### 7.3 习题渲染映射
 
-```
-┌────────────────────────────────────────────────────────┐
-│  📝 诊断评估                                            │
-│                                                        │
-│  📊 共 15 题 · 覆盖 15 个知识点 · 预计 20 分钟           │
-│                                                        │
-│  Q1. [选择题] 一个质量为 2kg 的物体受 10N 力...            │
-│  ○ A  ○ B  ○ C  ○ D                                   │
-│  ─────────────────────────────────────                 │
-│  Q2. [判断题] F=ma 只适用于匀速运动                       │
-│  ○ 对  ○ 错                                            │
-│                                                        │
-│  [📤 提交评估]                                          │
-│                                                        │
-│  ── 评估结果 ──                                        │
-│  📊 正确率: 9/15 (60%)                                  │
-│  ⚠️ 薄弱: 牛顿第二定律 (0%), 动量守恒 (33%)               │
-│  ⭐ 强项: 动能定理 (100%)                                │
-│  [📋 生成学习计划 →]                                     │
-└────────────────────────────────────────────────────────┘
-```
+| 题型 | Widget | key 前缀 |
+|------|--------|---------|
+| multiple_choice | `st.radio` | quiz_q_{n} / assess_q_{n} |
+| true_false | `st.radio(["对","错"])` | quiz_q_{n} / assess_q_{n} |
+| fill_in_blank | `st.text_input` | quiz_q_{n} / assess_q_{n} |
+| short_answer | `st.text_area` (100px) | quiz_q_{n} / assess_q_{n} |
+| essay | `st.text_area` (200px) | quiz_q_{n} / assess_q_{n} |
+| coding | `st.text_area` (150px) | quiz_q_{n} / assess_q_{n} |
 
-#### 📕 错题本页（含苏格拉底追问）
+### 7.4 异步处理
 
-```
-┌────────────────────────────────────────────────────────┐
-│  📕 错题本                                              │
-│                                                        │
-│  筛选: [全部知识点 ▼] [最近 7 天 ▼]                      │
-│                                                        │
-│  ┌─ 知识点: 牛顿第二定律 (3 道错题) ─────────────────┐  │
-│  │  Q1. [选择] 质量为 2kg 物体受 10N 力...              │  │
-│  │  你的答案: B (20 m/s²)    ❌                        │  │
-│  │  正确答案: A (5 m/s²)                               │  │
-│  │  解析: a = F/m = 10/2 = 5 m/s²                     │  │
-│  │  错误 2 次   [🔄 重新作答]  [🗨 苏格拉底追问]        │  │
-│  │                                                    │  │
-│  │  ── 🗨 苏格拉底对话 ──                              │  │
-│  │  🎓: 你回忆一下，牛顿第二定律的公式是什么？            │  │
-│  │  🙋 学生: [F=ma                    ] [发送]         │  │
-│  │  🎓: 对。已知 F=10N, m=2kg，求 a 应怎么做？          │  │
-│  │  🙋 学生: [a=10/2=5                ] [发送]         │  │
-│  │  🎓: 很好！现在你能理解正确答案了吗？                  │  │
-│  │  [我知道了 ✅]  [直接显示答案]                        │  │
-│  └────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────┘
-```
-
-### 8.4 UI 约定
-
-- **Loading：** 所有 LLM 调用使用 `with st.spinner("AI 正在处理…")` 包裹
-- **数据表格：** 使用 `st.dataframe()` 展示知识点、错题列表
-- **答题交互：** 选择题用 `st.radio()`，判断题用 `st.radio(["对", "错"])`，填空题用 `st.text_input()`
-- **状态切换：** `st.session_state` + `st.rerun()` 实现页面间跳转
-- **错误处理：** `st.error()` 展示异常信息，关键操作提供 `st.button("重试")`
+Streamlit 不支持原生 async，使用 `_run_async()` 包装：
+- 优先 `asyncio.run()`
+- 若已有 event loop → 尝试 `nest_asyncio.apply()` + `run_until_complete()`
 
 ---
 
-## 第 9 章 · Prompt 模板（5 个，替代旧 3 个角色 Prompt）
+## 第 8 章 · Prompt 模板
 
-### 9.1 parse_knowledge.md
+| 文件 | 调用者 | Temperature | Timeout |
+|------|--------|------------|---------|
+| `parse_knowledge.md` | KnowledgeEngine.parse() | 0.3 | 180s |
+| `assessment.md` | AssessmentEngine.generate() | 0.7 | 180s |
+| `quiz_gen.md` | QuizEngine.generate_questions() | 0.7 | 180s |
+| `grade.md` | QuizEngine.grade_answers() | 0.1 | 120s |
+| `socratic.md` | SocraticEngine | 0.7 | 120s |
 
-```markdown
-# System
-你是 {course_type} 教学专家。请将以下教材内容按知识点拆分。
+所有 Prompt 使用 `{variable}` 模板变量，运行时由 Engine 填充。LLM 返回 JSON 均经过 Markdown 代码围栏剥离（`_strip_markdown_fence`）。
 
-要求:
-1. 每个知识点是一个不可再分的概念/公式/定理
-2. 为每个知识点输出: title, summary(≤200字), keywords(数组), difficulty
-3. 识别知识点间的依赖关系: 每个知识点的 prerequisites 和 successors
-   - 用 title 描述依赖关系，后续系统会自动转为 ID
-4. 输出严格 JSON: {"knowledge_points": [{...}]}
+---
 
-课程类型: {course_type}
-拆分粒度: {granularity_hint}  （根据课程类型自动填充）
+## 第 9 章 · 异常体系
+
+**文件：** `super_tutor/core/exceptions.py`
+
 ```
-
-### 9.2 assessment.md
-
-```markdown
-# System
-你是 {course_type} 出题专家。请生成诊断评估测验。
-
-知识点列表 (按依赖关系排序):
-{kp_list_json}
-
-要求:
-- 每个知识点至少 1 题
-- 从前驱知识点开始，逐步到后继知识点
-- 题型: 选择题 60% + 判断题 20% + 填空题 20%
-- 难度匹配各知识点的 difficulty
-- 输出: {{"questions": [...]}}
-```
-
-### 9.3 quiz_gen.md
-
-```markdown
-# System
-请基于以下知识点生成练习题。
-
-目标知识点: {kp_title} (难度: {difficulty})
-知识点内容: {kp_summary}
-
-前驱知识背景 (已学过的知识):
-{prerequisite_context}
-
-要求:
-- 考察对「{kp_title}」的理解深度
-- 干扰项可引用前驱知识的常见迷思概念
-- 题型: {question_type}
-- 输出: {{"questions": [...]}}
-```
-
-### 9.4 grade.md
-
-```markdown
-# System
-请批改以下作答。
-
-题目: {stem}
-题型: {type}
-正确答案: {correct_answer}
-学生答案: {student_answer}
-
-规则:
-- 选择题/判断题: 直接比对，100% 准确
-- 填空题: 语义匹配 + 关键词比对，宽松判定
-- 输出: {{"is_correct": bool, "explanation": "详细解析"}}
-```
-
-### 9.5 socratic.md
-
-```markdown
-# System
-你是苏格拉底式导师。用户答错了关于「{kp_title}」的题。
-
-目标知识点: {kp_title}
-知识点摘要: {kp_summary}
-题目: {stem}
-用户错误答案: {student_answer}
-正确答案: {correct_answer}
-
-当前引导层级: {level}
-
-规则:
-- L1 (笼统引导): 提出概念性问题，让用户回忆相关知识
-- L2 (方向提示): 给出方向性提示，缩小思考范围
-- L3 (接近答案): 几乎说出答案但留最后一步
-- 用户回答正确 → 升级；不正确 → 同级换角度；说"显示答案" → 直接给出
+TutorError (基类)
+├── LLMError        — LLM 调用失败（超时、空内容、重试耗尽）
+└── MaterialError   — 教材解析失败（JSON 非法、空结果、prompt 加载失败）
 ```
 
 ---
 
-## 第 10 章 · FastAPI 路由精简
-
-**文件：** `super_tutor/routes/`（修改）
-
-### 10.1 保留的路由端点
-
-| 方法 | 路径 | 文件 | 变化 |
-|------|------|------|------|
-| POST | `/api/v1/materials/upload` | materials.py | 去 Orchestrator 依赖 |
-| POST | `/api/v1/materials/upload/file` | materials.py | 同上 |
-| GET | `/api/v1/materials/{id}/status` | materials.py | 同上 |
-| POST | `/api/v1/questions/generate` | quizzes.py | **重写**：直接调 QuizEngine |
-| POST | `/api/v1/questions/grade` | quizzes.py | **重写**：直接调 QuizEngine |
-| GET | `/api/v1/students/{id}/dashboard` | dashboard.py | 简化查询 |
-| GET | `/api/v1/students/{id}/mastery` | dashboard.py | 简化查询，从 knowledge_points 读 |
-| GET | `/api/v1/students/{id}/wrong-questions` | dashboard.py | 查询 wrong_questions 表 |
-| POST | `/api/v1/students/{id}/socratic/start` | dashboard.py | **新增**：调 SocraticEngine |
-| POST | `/api/v1/students/{id}/socratic/continue` | dashboard.py | **新增** |
-
-### 10.2 删除的路由端点
-
-| 原端点 | 原因 |
-|--------|------|
-| POST `/api/v1/sessions` | 无会话概念 |
-| GET `/api/v1/sessions/{id}/questions` | 无会话概念 |
-| POST `/api/v1/sessions/{id}/answers` | 无会话概念 |
-| GET `/api/v1/sessions/{id}/results` | 无会话概念 |
-| POST `/api/v1/sessions/{id}/plan` | 无会话概念 |
-| POST `/api/v1/sessions/{id}/restore` | 无 Orchestrator |
-| POST `/api/v1/sessions/{id}/resume` | 无 Orchestrator |
-| POST `/api/v1/sessions/{id}/retry` | 无 Orchestrator |
-| GET `/api/v1/tokens/stats` | 不再追踪 Token |
-| ~~POST `/api/v1/students/{id}/plan/today`~~ | 简化为直接查 study_plans |
-| ~~POST `/api/v1/students/{id}/plan/items/{id}/toggle`~~ | 不再需要 |
-
----
-
-## 第 11 章 · 启动方式
-
-### 11.1 旧方式（v2.0）
+## 第 10 章 · 启动方式
 
 ```bash
-# 终端 1: 后端
 cd super-tutor-agent
-python -m super_tutor.main --reload
-
-# 终端 2: 前端
-cd super-tutor-agent/frontend
-npm run dev
-```
-
-### 11.2 新方式（v3.0）
-
-```bash
-# 单命令启动
-cd super-tutor-agent
+pip install -r requirements.txt
+export TUTOR_API_KEY="sk-your-key"
 streamlit run app.py
 # → http://localhost:8501
 ```
 
-### 11.3 requirements.txt 变化
+### requirements.txt
 
-```diff
-- fastapi>=0.115.0
-- uvicorn[standard]>=0.30.0
-+ streamlit>=1.35
-  openai>=1.0.0
-  aiosqlite>=0.20.0
-- sqlite-vec>=0.1.0
-  pymupdf>=1.24.0
-  pydantic>=2.0.0
-- slowapi>=0.1.9
-  pytest>=8.0.0
-  pytest-asyncio>=0.24.0
-- httpx>=0.27.0
+```
+openai>=1.0.0          # LLM API 客户端
+aiosqlite>=0.20.0      # 异步 SQLite
+PyPDF2>=3.0.0          # PDF 文本提取
+pydantic>=2.0.0        # 数据校验
+streamlit>=1.35        # Web 前端
+pytest>=8.0.0          # 测试
+pytest-asyncio>=0.24.0 # 异步测试支持
 ```
 
-> FastAPI + Uvicorn 保留但不作为主要启动方式，仅需 API 扩展时使用。
-
 ---
 
-## 第 12 章 · 代码量估算
+## 附录 · 代码量统计
 
-| 模块 | 行数 | vs 旧架构 |
-|------|------|----------|
-| `app.py` (Streamlit) | ~500 | 替代 frontend/ (~1,800) |
-| `super_tutor/engine/` (5 文件) | ~1,000 | 替代 orchestrator (~2,200) |
-| `super_tutor/core/` (3 文件) | ~350 | 精简自 ~650 |
-| `super_tutor/models/` (4 文件) | ~400 | 精简自 ~1,200 |
-| `super_tutor/routes/` (3 文件) | ~300 | 精简自 ~1,000 |
-| `super_tutor/prompts/` (5 文件) | ~200 | 大致持平 |
-| `super_tutor/config.py` | ~50 | 精简自 ~100 |
-| `super_tutor/main.py` | ~80 | 精简自 ~220 |
-| `tests/` | ~400 | 大致持平 |
-| **总计** | **~3,280** | **vs ~10,000，精简约 67%** |
-
----
-
-## 附录 A · 旧架构残留检查清单
-
-实现时逐项确认：
-
-- [ ] `super_tutor/core/` 下 6 个文件已删除
-- [ ] `super_tutor/routes/` 下 2 个文件已删除（dependencies.py, tokens.py）
-- [ ] `super_tutor/prompts/` 下 3 个文件已替换为 5 个新文件
-- [ ] `super_tutor/models/` 中 `enums.py` 已精简
-- [ ] `super_tutor/models/` 中 `mastery.py` 内容已合并到 `knowledge.py`
-- [ ] `frontend/` 目录已删除
-- [ ] `requirements.txt` 已更新
-- [ ] `super_tutor/main.py` 中无 Orchestrator/RoleManager/TokenTracker/limiter 引用
-- [ ] `tests/conftest.py` 中无 Orchestrator/FakeLLMClient fixture
-- [ ] 所有 `from super_tutor.core.orchestrator import ...` 引用已清除
-- [ ] 所有 `from super_tutor.core.role_manager import ...` 引用已清除
-- [ ] 所有 `from super_tutor.core.token_tracker import ...` 引用已清除
+| 模块 | 行数 | 说明 |
+|------|------|------|
+| `app.py` | ~1,970 | Streamlit 前端 |
+| `core/database.py` | ~900 | 6 表 DDL + CRUD |
+| `core/llm_client.py` | ~125 | OpenAI SDK 封装 + 重试 |
+| `core/exceptions.py` | ~40 | 3 个异常类 |
+| `config.py` | ~90 | 4 字段配置 |
+| `engine/` (5 文件) | ~2,100 | 5 个无状态 Engine |
+| `models/` (7 文件) | ~580 | Pydantic 模型 + 枚举 |
+| `prompts/` (5 文件) | ~250 | Prompt 模板 |
+| `tests/` (9 文件) | ~1,500 | 测试 |
+| **总计** | **~7,555** | |

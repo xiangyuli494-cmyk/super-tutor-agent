@@ -8,10 +8,9 @@
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.35+-red)](https://streamlit.io/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-v3.0-brightgreen)]()
-[![Tests](https://img.shields.io/badge/Tests-148/148%20passed-brightgreen)]()
+[![Tests](https://img.shields.io/badge/Tests-145/145%20passed-brightgreen)]()
 
 ---
 
@@ -63,7 +62,6 @@ app.py (Streamlit 前端)
 ```
 
 - **前端**: Streamlit 单页应用，一个 `streamlit run` 启动
-- **后端**: FastAPI（可选 API 扩展）
 - **LLM**: DeepSeek API
 - **数据库**: SQLite 6 表（materials / knowledge_points / questions / quiz_attempts / wrong_questions / study_plans）
 - **无状态机**: 页面按钮驱动用户流程，去掉旧 Orchestrator 状态机 (~2,200 行)
@@ -112,7 +110,7 @@ streamlit run app.py
 
 ```bash
 python -m pytest tests/ -v
-# 148 passed
+# 145 passed
 ```
 
 ---
@@ -128,7 +126,6 @@ super-tutor-agent/
 │
 ├── super_tutor/
 │   ├── config.py                  # 配置管理
-│   ├── main.py                    # FastAPI 入口（可选）
 │   ├── core/
 │   │   ├── database.py            # 数据库层（6 表）
 │   │   ├── llm_client.py          # LLM 客户端
@@ -144,9 +141,9 @@ super-tutor-agent/
 │   │   ├── knowledge.py
 │   │   ├── quiz.py
 │   │   ├── assessment.py
+│   │   ├── mastery.py
 │   │   ├── plan.py
 │   │   └── socratic.py
-│   ├── routes/                    # FastAPI 路由
 │   └── prompts/                   # LLM Prompt 模板
 │       ├── parse_knowledge.md
 │       ├── assessment.md
@@ -154,7 +151,7 @@ super-tutor-agent/
 │       ├── grade.md
 │       └── socratic.md
 │
-├── tests/                         # 148 个测试
+├── tests/                         # 145 个测试
 │   ├── conftest.py
 │   ├── test_knowledge_engine.py
 │   ├── test_assessment.py

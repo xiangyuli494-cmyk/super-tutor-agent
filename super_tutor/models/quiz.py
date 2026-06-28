@@ -102,10 +102,6 @@ class Question(BaseModel):
         description="创建时间（ISO 8601）",
     )
 
-    @property
-    def hint_count(self) -> int:
-        """提示数量。"""
-        return len(self.hints)
 
 
 # ============================================================================
@@ -156,63 +152,4 @@ class QuizAttempt(BaseModel):
         default=None,
         description="提交时间（ISO 8601）",
     )
-    metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        description="扩展元数据",
-    )
 
-    @property
-    def is_graded(self) -> bool:
-        """是否已批改。"""
-        return self.is_correct is not None
-
-
-# ============================================================================
-# WrongQuestion — 错题本
-# ============================================================================
-
-
-class WrongQuestion(BaseModel):
-    """错题本条目 — 记录学生答错的题目及其复习状态。
-
-    同一题目多次答错会通过 ``wrong_count`` 累计，
-    通过 ``is_reviewed`` 追踪学生是否已复习该错题。
-    """
-
-    wq_id: str = Field(
-        default_factory=lambda: str(uuid4()),
-        description="错题记录唯一标识",
-    )
-    student_id: str = Field(
-        default="default",
-        description="学生标识",
-    )
-    question_id: str = Field(
-        ...,
-        description="题目 ID",
-    )
-    kp_id: str = Field(
-        ...,
-        description="关联的知识点 ID",
-    )
-    attempt_id: str = Field(
-        ...,
-        description="关联的作答记录 ID",
-    )
-    wrong_count: int = Field(
-        default=1,
-        ge=1,
-        description="累计答错次数",
-    )
-    is_reviewed: bool = Field(
-        default=False,
-        description="是否已复习",
-    )
-    last_wrong_at: str = Field(
-        ...,
-        description="最近一次答错时间（ISO 8601）",
-    )
-    created_at: str = Field(
-        ...,
-        description="首次收录时间（ISO 8601）",
-    )

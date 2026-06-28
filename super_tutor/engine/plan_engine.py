@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 from uuid import uuid4
 
 from super_tutor.core.database import Database

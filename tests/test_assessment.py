@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
-
 import pytest
 
 from super_tutor.engine.assessment_engine import AssessmentEngine
 from super_tutor.models.assessment import AssessmentReport, KPAssessmentResult
-from super_tutor.models.enums import DifficultyLevel, QuestionType
-from super_tutor.models.quiz import Question, QuizAttempt
 
 
 # ============================================================================
@@ -229,17 +224,6 @@ class TestPrerequisiteRules:
 
 class TestAssessmentReport:
     """AssessmentReport model tests."""
-
-    def test_overall_mastery(self):
-        """Average of all KP adjusted_mastery values."""
-        report = AssessmentReport(
-            kp_results=[
-                KPAssessmentResult(kp_id="a", adjusted_mastery=0.8),
-                KPAssessmentResult(kp_id="b", adjusted_mastery=0.4),
-                KPAssessmentResult(kp_id="c", adjusted_mastery=0.6),
-            ]
-        )
-        assert report.overall_mastery == pytest.approx(0.6)
 
     def test_mastery_distribution(self):
         """Count KPs by status."""

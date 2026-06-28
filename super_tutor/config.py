@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -20,16 +20,12 @@ class TutorConfig:
         api_base_url: API 基础 URL。
         db_path: SQLite 数据库文件路径。
         model: 默认模型名称。
-        max_retries: 最大重试次数。
-        request_timeout: 请求超时（秒）。
     """
 
     api_key: str = ""
     api_base_url: str = "https://api.deepseek.com"
     db_path: str = "~/.super-tutor/super_tutor.db"
     model: str = "deepseek-chat"
-    max_retries: int = 3
-    request_timeout: int = 120
 
     # ------------------------------------------------------------------
     # Factory: load from file + env
@@ -72,8 +68,6 @@ class TutorConfig:
             "api_base_url": "api_base_url",
             "db_path": "db_path",
             "model": "model",
-            "max_retries": "max_retries",
-            "request_timeout": "request_timeout",
         }
         for file_key, attr in _FILE_KEY_MAP.items():
             if file_key in data:
@@ -85,8 +79,6 @@ class TutorConfig:
             "TUTOR_API_BASE_URL": ("api_base_url", str),
             "TUTOR_DB_PATH": ("db_path", str),
             "TUTOR_MODEL": ("model", str),
-            "TUTOR_MAX_RETRIES": ("max_retries", int),
-            "TUTOR_REQUEST_TIMEOUT": ("request_timeout", int),
         }
         for env_var, (attr, cast) in _ENV_MAP.items():
             value = os.environ.get(env_var)

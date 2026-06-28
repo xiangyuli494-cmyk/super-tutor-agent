@@ -6,8 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -61,38 +60,6 @@ class StudyPlan(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).isoformat(),
         description="最后更新时间（ISO 8601）",
     )
-
-    # -- 查询方法 -----------------------------------------------------------
-
-    def get_items_for_date(self, date_str: str) -> list[ReviewItem]:
-        """返回指定日期的所有排期条目。"""
-        return [it for it in self.schedule if it.scheduled_date == date_str]
-
-    def get_pending_items(self) -> list[ReviewItem]:
-        """返回所有未完成的条目（含逾期），按日期升序。"""
-        return sorted(
-            [it for it in self.schedule if not it.completed],
-            key=lambda it: it.scheduled_date,
-        )
-
-    def get_overdue_items(self) -> list[ReviewItem]:
-        """返回所有逾期未完成的条目。"""
-        today = datetime.now(timezone.utc).date().isoformat()
-        return [
-            it
-            for it in self.schedule
-            if not it.completed and it.scheduled_date < today
-        ]
-
-    def get_upcoming_items(self, days: int = 7) -> list[ReviewItem]:
-        """返回未来 N 天内的排期条目。"""
-        today = datetime.now(timezone.utc).date()
-        cutoff = today + timedelta(days=days)
-        return [
-            it
-            for it in self.schedule
-            if today.isoformat() <= it.scheduled_date <= cutoff.isoformat()
-        ]
 
     # -- 统计 ---------------------------------------------------------------
 

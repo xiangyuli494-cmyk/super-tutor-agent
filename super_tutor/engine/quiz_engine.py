@@ -10,7 +10,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from uuid import uuid4
 
 from super_tutor.core.database import Database
@@ -18,7 +18,6 @@ from super_tutor.core.exceptions import LLMError, MaterialError
 from super_tutor.core.llm_client import LLMClient
 from super_tutor.engine.knowledge_engine import KnowledgeEngine, _parse_json_list
 from super_tutor.models.enums import DifficultyLevel, QuestionType
-from super_tutor.models.knowledge import KnowledgePoint
 from super_tutor.models.quiz import Question, QuizAttempt
 
 logger = logging.getLogger(__name__)

@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -98,11 +97,6 @@ class KPAssessmentResult(BaseModel):
         description="诊断备注",
     )
 
-    @property
-    def is_mastered(self) -> bool:
-        """是否已达到掌握水平。"""
-        return self.adjusted_mastery >= 0.8
-
 
 # ============================================================================
 # AssessmentReport — 一次完整的诊断性评估报告
@@ -183,12 +177,3 @@ class AssessmentReport(BaseModel):
         for r in self.kp_results:
             dist[r.status] = dist.get(r.status, 0) + 1
         return dist
-
-    @property
-    def overall_mastery(self) -> float:
-        """所有 KP 的平均调整后掌握度。"""
-        if not self.kp_results:
-            return 0.0
-        return round(
-            sum(r.adjusted_mastery for r in self.kp_results) / len(self.kp_results), 4
-        )

@@ -37,7 +37,7 @@ from super_tutor.engine.knowledge_engine import KnowledgeEngine
 from super_tutor.engine.plan_engine import PlanEngine
 from super_tutor.engine.quiz_engine import QuizEngine
 from super_tutor.engine.socratic_engine import SocraticEngine
-from super_tutor.models.assessment import AssessmentReport, KPAssessmentResult
+from super_tutor.models.assessment import AssessmentReport
 from super_tutor.models.enums import DifficultyLevel, QuestionType
 from super_tutor.models.plan import StudyPlan
 from super_tutor.models.quiz import Question, QuizAttempt
@@ -68,14 +68,6 @@ COURSE_TYPES = [
     "economics",
     "other",
 ]
-
-DIFFICULTY_COLORS = {
-    "beginner": "#6EE7B7",
-    "easy": "#A7F3D0",
-    "medium": "#FDE68A",
-    "hard": "#FCA5A5",
-    "expert": "#F87171",
-}
 
 # ---------------------------------------------------------------------------
 # Session state keys
@@ -814,11 +806,6 @@ def _render_question(question: Question, index: int, prefix: str = "quiz"):
     elif q_type == "essay":
         return st.text_area(stem_md, height=200, key=f"{prefix}_q_{index}")
 
-    elif q_type == "matching":
-        # matching 题型已移除，按简答题降级处理
-        st.caption("（匹配题型已弃用，请按简答题作答）")
-        return st.text_area(stem_md, height=150, key=f"{prefix}_q_{index}")
-
     else:
         # coding or any future type — fallback to text area
         return st.text_area(stem_md, height=150, key=f"{prefix}_q_{index}")
@@ -906,6 +893,7 @@ def _do_grade_quiz(
                     )
             return count
 
+        wrong_count = 0
         if wrong_attempts:
             wrong_count = _run_async(_batch_add_wrong_book())
             if wrong_count < len(wrong_attempts):
@@ -1515,12 +1503,6 @@ def _render_plan_tab(kps: list) -> None:
         col_info, col_action = st.columns([3, 1])
 
         with col_info:
-            # Mastery progress bar with colored label
-            bar_color = (
-                "#EF4444" if mastery < 0.5
-                else "#F59E0B" if mastery < 0.8
-                else "#10B981"
-            )
             st.progress(mastery)
             st.caption(
                 f"掌握度 "
@@ -1926,9 +1908,7 @@ def _render_wrong_book(db: Database, kps: list) -> None:
                         ),
                         disabled=unknown_kp,
                     ):
-                        _do_redo_from_wrong_book(
-                            db=db, kp_id=kid, kps=kps
-                        )
+                        _do_redo_from_wrong_book(kp_id=kid)
                         st.rerun()
                 with col_socratic:
                     socratic_active = (
@@ -1956,7 +1936,7 @@ def _render_wrong_book(db: Database, kps: list) -> None:
                 st.markdown("---")
 
 
-def _do_redo_from_wrong_book(db: Database, kp_id: str, kps: list) -> None:
+def _do_redo_from_wrong_book(kp_id: str) -> None:
     """Generate a new quiz for the given KP and switch to quiz tab."""
     quiz_engine: QuizEngine | None = st.session_state.get(_S_QUIZ_ENGINE)
     if quiz_engine is None:

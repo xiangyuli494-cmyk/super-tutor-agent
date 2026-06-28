@@ -29,9 +29,6 @@ VALID_LEVELS: set[str] = {
     SHOW_ANSWER,
 }
 
-# 引导层级顺序（用于升级/降级判断）
-LEVEL_ORDER: tuple[str, ...] = (L1_GUIDING, L2_HINTING, L3_NEAR_ANSWER)
-
 
 # ============================================================================
 # SocraticTurn — 单轮苏格拉底对话

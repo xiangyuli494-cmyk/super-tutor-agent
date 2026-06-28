@@ -7,25 +7,6 @@ from enum import Enum
 
 
 # ============================================================================
-# CourseType — 课程/学科类型
-# ============================================================================
-
-
-class CourseType(str, Enum):
-    """课程类型，对应不同的学科领域。"""
-
-    PHYSICS = "physics"
-    MATHEMATICS = "mathematics"
-    CHEMISTRY = "chemistry"
-    BIOLOGY = "biology"
-    COMPUTER_SCIENCE = "computer_science"
-    HISTORY = "history"
-    LITERATURE = "literature"
-    ENGLISH = "english"
-    GENERAL = "general"
-
-
-# ============================================================================
 # DifficultyLevel — 难度等级
 # ============================================================================
 
@@ -54,18 +35,3 @@ class QuestionType(str, Enum):
     SHORT_ANSWER = "short_answer"        # 简答题
     ESSAY = "essay"                      # 论述题 / 作文
     CODING = "coding"                    # 编程题
-
-
-# ============================================================================
-# PlanStatus — 学习计划状态
-# ============================================================================
-
-
-class PlanStatus(str, Enum):
-    """学习计划的生命周期状态。"""
-
-    ACTIVE = "active"
-    PAUSED = "paused"
-    COMPLETED = "completed"
-    ARCHIVED = "archived"
-

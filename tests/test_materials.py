@@ -34,17 +34,6 @@ class TestMaterials:
         row = await test_db.get_material("nonexistent")
         assert row is None
 
-    async def test_list_materials(self, test_db):
-        """list_materials should return all materials."""
-        await _create_test_material(test_db, material_id="mat-a", title="A")
-        await _create_test_material(test_db, material_id="mat-b", title="B")
-
-        mats = await test_db.list_materials()
-        assert len(mats) >= 2
-        titles = [m["title"] for m in mats]
-        assert "A" in titles
-        assert "B" in titles
-
     async def test_get_material_returns_all_fields(self, test_db):
         """get_material should return content, status, course_type."""
         await _create_test_material(

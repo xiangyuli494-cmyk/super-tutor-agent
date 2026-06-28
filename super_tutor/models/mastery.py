@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -29,10 +29,6 @@ class ReviewItem(BaseModel):
     knowledge_node_id: str = Field(
         ...,
         description="对应的 KnowledgeNode ID",
-    )
-    mastery_record_id: Optional[str] = Field(
-        default=None,
-        description="关联的 MasteryRecord ID（如有）",
     )
     scheduled_date: str = Field(
         ...,
@@ -59,9 +55,4 @@ class ReviewItem(BaseModel):
         default="",
         description="备注",
     )
-    metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        description="扩展元数据",
-    )
-
 

@@ -4,25 +4,17 @@
 """
 
 from super_tutor.models.enums import (
-    CourseType,
     DifficultyLevel,
-    PlanStatus,
     QuestionType,
 )
 
 from super_tutor.models.knowledge import (
-    KnowledgeChunk,
-    KnowledgeEdge,
-    KnowledgeGraph,
-    KnowledgeNode,
     KnowledgePoint,
-    Material,
 )
 
 from super_tutor.models.quiz import (
     Question,
     QuizAttempt,
-    WrongQuestion,
 )
 
 from super_tutor.models.assessment import (
@@ -38,21 +30,13 @@ from super_tutor.models.socratic import SocraticTurn
 
 __all__ = [
     # Enums
-    "CourseType",
     "DifficultyLevel",
-    "PlanStatus",
     "QuestionType",
     # Knowledge
-    "KnowledgeChunk",
-    "KnowledgeEdge",
-    "KnowledgeGraph",
-    "KnowledgeNode",
     "KnowledgePoint",
-    "Material",
     # Quiz
     "Question",
     "QuizAttempt",
-    "WrongQuestion",
     # Assessment
     "AssessmentReport",
     "KPAssessmentResult",

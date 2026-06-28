@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 import aiosqlite
 
@@ -191,25 +191,17 @@ class Database:
     # Lifecycle
     # ==================================================================
 
-    def __init__(
-        self,
-        db_path: str,
-        projects_root: Optional[str] = None,
-    ) -> None:
+    def __init__(self, db_path: str) -> None:
         """Initialise the Database manager.
 
         Args:
             db_path: Path to the SQLite database file (e.g.
                 ``/home/user/super-tutor/super_tutor.db``).
-            projects_root: Optional project root directory to scope *db_path*
-                within.  When provided the resolved *db_path* must reside
-                inside this root.
 
         Raises:
-            ValueError: If *db_path* is outside *projects_root* or the parent
-                directory does not exist.
+            ValueError: If the parent directory does not exist.
         """
-        self.db_path: str = self._validate_db_path(db_path, projects_root)
+        self.db_path: str = self._validate_db_path(db_path)
         self._conn: Optional[aiosqlite.Connection] = None
 
     async def initialize(self) -> None:
@@ -263,22 +255,19 @@ class Database:
         await self._conn.commit()
 
     @staticmethod
-    def _validate_db_path(db_path: str, projects_root: Optional[str] = None) -> str:
+    def _validate_db_path(db_path: str) -> str:
         """Validate and resolve the database path.
 
-        Ensures the parent directory exists and (when *projects_root* is given)
-        that the resolved path resides inside the allowed project root.
+        Ensures the parent directory exists.
 
         Args:
             db_path: Requested database file path (may be relative or absolute).
-            projects_root: Optional project root directory to scope the path within.
 
         Returns:
             The resolved absolute path.
 
         Raises:
-            ValueError: If the path escapes the allowed root or the parent
-                directory does not exist.
+            ValueError: If the parent directory does not exist.
         """
         resolved = os.path.abspath(os.path.expanduser(db_path))
         parent_dir = os.path.dirname(resolved)
@@ -287,14 +276,6 @@ class Database:
             raise ValueError(
                 f"Parent directory for database does not exist: {parent_dir}"
             )
-
-        if projects_root is not None:
-            root = os.path.abspath(os.path.expanduser(projects_root))
-            if not resolved.startswith(root + os.sep) and resolved != root:
-                raise ValueError(
-                    f"Database path {resolved!r} is outside the project root "
-                    f"{root!r}."
-                )
 
         return resolved
 
@@ -361,19 +342,6 @@ class Database:
         )
         row = await cursor.fetchone()
         return self._row_to_dict(row) if row else None
-
-    async def list_materials(self) -> list[dict[str, Any]]:
-        """List all materials, ordered by creation time (newest first).
-
-        Returns:
-            A list of material dicts (may be empty).
-        """
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            "SELECT * FROM materials ORDER BY created_at DESC"
-        )
-        rows = await cursor.fetchall()
-        return self._rows_to_dicts(rows)
 
     async def update_material(
         self, material_id: str, updates: dict[str, Any]
@@ -609,31 +577,6 @@ class Database:
         row = await cursor.fetchone()
         return self._row_to_dict(row) if row else None
 
-    async def get_questions_batch(
-        self, question_ids: list[str]
-    ) -> dict[str, dict[str, Any]]:
-        """Batch-fetch questions by IDs (avoids N+1 queries).
-
-        Args:
-            question_ids: List of question IDs to fetch. Empty list → empty dict.
-
-        Returns:
-            Dict mapping ``question_id`` → question row dict.
-        """
-        if not question_ids:
-            return {}
-        assert self._conn is not None
-        placeholders = ",".join("?" for _ in question_ids)
-        cursor = await self._conn.execute(
-            f"SELECT * FROM questions WHERE question_id IN ({placeholders})",
-            tuple(question_ids),
-        )
-        rows = await cursor.fetchall()
-        return {
-            self._row_to_dict(r)["question_id"]: self._row_to_dict(r)
-            for r in rows
-        }
-
     # ==================================================================
     # Quiz Attempt CRUD
     # ==================================================================
@@ -699,15 +642,6 @@ class Database:
         await self._conn.commit()
         return attempt["attempt_id"]
 
-    async def get_attempt(self, attempt_id: str) -> Optional[dict[str, Any]]:
-        """Retrieve a single attempt by ID."""
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            "SELECT * FROM quiz_attempts WHERE attempt_id = ?", (attempt_id,)
-        )
-        row = await cursor.fetchone()
-        return self._row_to_dict(row) if row else None
-
     async def list_attempts_by_student(
         self,
         student_id: str,
@@ -755,35 +689,6 @@ class Database:
         )
         rows = await cursor.fetchall()
         return (self._rows_to_dicts(rows), total)
-
-    async def update_attempt_grading(
-        self,
-        attempt_id: str,
-        is_correct: bool,
-        score: float,
-        misconception_ids: Optional[list[str]] = None,
-    ) -> None:
-        """Update an attempt with grading results after evaluation.
-
-        Args:
-            attempt_id: The attempt to update.
-            is_correct: Whether the answer was correct.
-            score: The awarded score.
-            misconception_ids: Optional list of misconception tag IDs.
-        """
-        assert self._conn is not None
-        mis_ids = (
-            json.dumps(misconception_ids, ensure_ascii=False)
-            if misconception_ids
-            else "[]"
-        )
-        await self._conn.execute(
-            """UPDATE quiz_attempts
-               SET is_correct = ?, score = ?, misconception_ids = ?
-               WHERE attempt_id = ?""",
-            (1 if is_correct else 0, score, mis_ids, attempt_id),
-        )
-        await self._conn.commit()
 
     # ==================================================================
     # Wrong Questions CRUD (错题本)
@@ -991,110 +896,3 @@ class Database:
         except (json.JSONDecodeError, TypeError):
             result["kp_sequence"] = []
         return result
-
-    async def list_study_plans_by_student(
-        self, student_id: str
-    ) -> list[dict[str, Any]]:
-        """List all study plans for a student, newest first."""
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            """SELECT * FROM study_plans
-               WHERE student_id = ?
-               ORDER BY created_at DESC""",
-            (student_id,),
-        )
-        rows = await cursor.fetchall()
-        results = self._rows_to_dicts(rows)
-        for r in results:
-            try:
-                r["kp_sequence"] = json.loads(r.get("kp_sequence", "[]"))
-            except (json.JSONDecodeError, TypeError):
-                r["kp_sequence"] = []
-        return results
-
-    async def update_kp_sequence(
-        self, plan_id: str, kp_sequence: list[dict[str, Any]]
-    ) -> None:
-        """Update the KP sequence of a study plan.
-
-        Args:
-            plan_id: The study plan identifier.
-            kp_sequence: List of ``{kp_id, order, activity_type, ...}`` dicts.
-        """
-        assert self._conn is not None
-        from datetime import datetime, timezone
-
-        now = datetime.now(timezone.utc).isoformat()
-        await self._conn.execute(
-            """UPDATE study_plans
-               SET kp_sequence = ?, updated_at = ?
-               WHERE plan_id = ?""",
-            (json.dumps(kp_sequence, ensure_ascii=False), now, plan_id),
-        )
-        await self._conn.commit()
-
-    async def get_today_items(
-        self, student_id: str, date_str: str
-    ) -> list[dict[str, Any]]:
-        """Get review items scheduled for a student on a specific date.
-
-        Parses ``kp_sequence`` JSON from all active study plans for the
-        student and returns items whose ``scheduled_date`` matches
-        *date_str*.
-
-        Args:
-            student_id: The student identifier.
-            date_str: ISO 8601 date string (e.g. ``"2026-06-23"``).
-
-        Returns:
-            A list of review item dicts sorted by activity_type.
-        """
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            """SELECT * FROM study_plans
-               WHERE student_id = ? AND status = 'active'
-               ORDER BY created_at DESC""",
-            (student_id,),
-        )
-        rows = await cursor.fetchall()
-
-        items: list[dict[str, Any]] = []
-        for row in rows:
-            plan = dict(row)
-            try:
-                sequence = json.loads(plan.get("kp_sequence", "[]"))
-            except (json.JSONDecodeError, TypeError):
-                continue
-            for entry in sequence:
-                if entry.get("scheduled_date") == date_str:
-                    entry["plan_id"] = plan["plan_id"]
-                    entry["plan_title"] = plan.get("title", "")
-                    items.append(entry)
-
-        items.sort(key=lambda x: (x.get("activity_type", ""), x.get("order", 0)))
-        return items
-
-    async def update_kp_sequence_item(
-        self, plan_id: str, item_index: int, updates: dict[str, Any]
-    ) -> None:
-        """Update a single item within a study plan's kp_sequence.
-
-        Args:
-            plan_id: The study plan identifier.
-            item_index: Zero-based index in the kp_sequence array.
-            updates: Key-value pairs to merge into the item.
-        """
-        assert self._conn is not None
-        plan = await self.get_study_plan(plan_id)
-        if plan is None:
-            raise LookupError(f"Study plan not found: {plan_id!r}")
-
-        sequence: list = plan.get("kp_sequence", [])
-        if item_index < 0 or item_index >= len(sequence):
-            raise IndexError(
-                f"Item index {item_index} out of range for plan {plan_id!r} "
-                f"(length {len(sequence)})"
-            )
-
-        sequence[item_index].update(updates)
-        await self.update_kp_sequence(plan_id, sequence)
