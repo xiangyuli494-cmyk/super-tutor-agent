@@ -22,6 +22,12 @@ class FakeLLMClient:
     """Lightweight test double that returns canned parse results."""
 
     def __init__(self, canned: dict | None = None) -> None:
+        """Initialize with optional canned response override.
+
+        Args:
+            canned: If provided, this dict is returned as JSON instead of
+                    the default Newton's laws canned data.
+        """
         self.calls: list[dict[str, Any]] = []
         self._canned = canned  # Override default response
 
@@ -32,6 +38,10 @@ class FakeLLMClient:
         max_tokens: int = 4096,
         timeout: int = 120,
     ) -> str:
+        """Return canned knowledge_points JSON (Newton's laws) or custom override.
+
+        Logs the first 200 chars of the user message for test assertions.
+        """
         user_msg = ""
         for m in messages:
             if m.get("role") == "user":
@@ -134,6 +144,7 @@ class TestKnowledgeEngineParse:
 
         class BrokenFakeLLM:
             async def chat(self, **kwargs):
+                """Return non-JSON text, causing a MaterialError in parse()."""
                 return "这不是 JSON"
 
         mat_id = await _create_test_material(test_db, material_id="mat-broken")
@@ -152,6 +163,7 @@ class TestKnowledgeEngineParse:
 
         class FenceFakeLLM:
             async def chat(self, **kwargs):
+                """Return JSON wrapped in Markdown code fence to test stripping logic."""
                 return '```json\n{"knowledge_points": [{"index": 0, "title": "测试", "content": "内容", "summary": "摘要", "difficulty": "easy", "keywords": ["k"], "prerequisite_indices": []}]}\n```'
 
         engine = KnowledgeEngine(db=test_db, llm_client=FenceFakeLLM())

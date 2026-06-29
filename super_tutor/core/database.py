@@ -617,6 +617,10 @@ class Database:
         assert self._conn is not None
 
         def _json_field(value: Any) -> str:
+            """Serialize a list/dict to JSON string for DB storage.
+
+            Lists and dicts → json.dumps(); other values → str(); falsy → "[]".
+            """
             if isinstance(value, (list, dict)):
                 return json.dumps(value, ensure_ascii=False)
             return str(value) if value else "[]"

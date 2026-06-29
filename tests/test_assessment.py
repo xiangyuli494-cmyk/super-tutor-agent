@@ -106,6 +106,10 @@ class TestPrerequisiteRules:
     """Three prerequisite calibration rules."""
 
     def _make_report(self, kp_results: list[KPAssessmentResult]) -> AssessmentReport:
+        """Build a minimal AssessmentReport from a list of KP results.
+
+        Computes total_questions, correct_count, and kp_ids automatically.
+        """
         return AssessmentReport(
             assessment_id="test-001",
             student_id="student-1",

@@ -54,6 +54,12 @@ FONT_MONO  = "Consolas"
 
 # ── Helpers ─────────────────────────────────────────────────
 def set_slide_bg(slide, color):
+    """Set the background fill color of a slide.
+
+    Args:
+        slide: pptx Slide object.
+        color: RGBColor to use as the solid background fill.
+    """
     bg = slide.background
     fill = bg.fill
     fill.solid()
@@ -62,6 +68,22 @@ def set_slide_bg(slide, color):
 def add_textbox(slide, left, top, width, height, text="", font_size=14,
                 color=C_TEXT, bold=False, font_name=FONT_BODY, alignment=PP_ALIGN.LEFT,
                 line_spacing=1.2):
+    """Add a single-paragraph text box to a slide.
+
+    Args:
+        slide: pptx Slide object.
+        left, top, width, height: Position and size in inches.
+        text: The text content.
+        font_size: Font size in points.
+        color: RGBColor for the text.
+        bold: Whether the text is bold.
+        font_name: Font family name (e.g. "Arial").
+        alignment: Text horizontal alignment (PP_ALIGN.LEFT/CENTER/RIGHT).
+        line_spacing: Line height multiplier (1.0 = single, 1.2 = 120%).
+
+    Returns:
+        The pptx TextFrame object for further manipulation.
+    """
     txBox = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     tf = txBox.text_frame
     tf.word_wrap = True
@@ -78,7 +100,18 @@ def add_textbox(slide, left, top, width, height, text="", font_size=14,
     return tf
 
 def add_rich_textbox(slide, left, top, width, height, runs, alignment=PP_ALIGN.LEFT):
-    """runs: list of (text, font_size, color, bold, font_name)"""
+    """Add a text box with multiple styled runs within a single paragraph.
+
+    Args:
+        slide: pptx Slide object.
+        left, top, width, height: Position and size in inches.
+        runs: List of (text, font_size, color, bold, font_name) tuples.
+            Each tuple creates one run with independent styling.
+        alignment: Text horizontal alignment.
+
+    Returns:
+        The pptx TextFrame object.
+    """
     txBox = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     tf = txBox.text_frame
     tf.word_wrap = True
@@ -99,7 +132,22 @@ def add_rich_textbox(slide, left, top, width, height, runs, alignment=PP_ALIGN.L
 def add_multiline(slide, left, top, width, height, lines, font_size=14,
                   color=C_TEXT, bold_first=False, font_name=FONT_BODY,
                   line_spacing=1.4, alignment=PP_ALIGN.LEFT):
-    """lines: list of str, first line can be bold"""
+    """Add a text box with multiple paragraphs (one per line).
+
+    Args:
+        slide: pptx Slide object.
+        left, top, width, height: Position and size in inches.
+        lines: List of strings, each becomes a separate paragraph.
+        font_size: Font size in points.
+        color: RGBColor for text.
+        bold_first: If True, the first paragraph is rendered bold.
+        font_name: Font family name.
+        line_spacing: Line height multiplier.
+        alignment: Text horizontal alignment.
+
+    Returns:
+        The pptx TextFrame object.
+    """
     txBox = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     tf = txBox.text_frame
     tf.word_wrap = True
@@ -120,6 +168,18 @@ def add_multiline(slide, left, top, width, height, lines, font_size=14,
 
 def add_rect(slide, left, top, width, height, fill_color=None,
              border_color=None, border_width=Pt(0)):
+    """Add a rectangle shape (used for cards, panels, backgrounds).
+
+    Args:
+        slide: pptx Slide object.
+        left, top, width, height: Position and size in inches.
+        fill_color: Optional RGBColor for solid fill. None = transparent.
+        border_color: Optional RGBColor for border. None = no border.
+        border_width: Border thickness in Pt (default Pt(0)).
+
+    Returns:
+        The pptx Shape object.
+    """
     shape = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
         Inches(left), Inches(top), Inches(width), Inches(height)
@@ -137,7 +197,18 @@ def add_rect(slide, left, top, width, height, fill_color=None,
     return shape
 
 def add_line(slide, left, top, width, height, color=C_BORDER, width_pt=1):
-    """Horizontal or vertical line using a thin rectangle"""
+    """Add a horizontal or vertical separator line (thin filled rectangle).
+
+    Args:
+        slide: pptx Slide object.
+        left, top, width, height: Position and size in inches.
+            Use very small height for horizontal lines, small width for vertical.
+        color: RGBColor for the line fill.
+        width_pt: Unused (kept for API compatibility).
+
+    Returns:
+        The pptx Shape object.
+    """
     shape = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
         Inches(left), Inches(top), Inches(width), Inches(height)
@@ -148,16 +219,39 @@ def add_line(slide, left, top, width, height, color=C_BORDER, width_pt=1):
     return shape
 
 def add_accent_bar(slide):
-    """Left navy accent bar"""
+    """Add the left-edge navy accent bar (visual branding element).
+
+    Renders a thin vertical bar (0.08" × 7.5") at the left edge of every slide.
+    """
     add_rect(slide, 0, 0, 0.08, 7.5, fill_color=C_ACCENT)
 
 def add_page_num(slide, current, total):
+    """Add a page number badge to the bottom-right corner of a slide.
+
+    Renders as "01 / 11" in monospace grey text.
+
+    Args:
+        slide: pptx Slide object.
+        current: Current page number (1-based).
+        total: Total number of slides.
+    """
     add_textbox(slide, 11.55, 7.0, 1.5, 0.4,
                 f"{current:02d} / {total:02d}", font_size=10,
                 color=C_TEXT_LOW, font_name=FONT_MONO, alignment=PP_ALIGN.RIGHT)
 
 def add_slide_header(slide, num_label, title):
-    """Standard slide header with section label + title + rule"""
+    """Render a standard slide header: section tag + title + bottom border line.
+
+    Layout (y positions in inches):
+        num_label at y=0.55 (small navy caps, e.g. "背景")
+        title     at y=0.82 (16pt bold)
+        separator at y=1.20 (thin grey horizontal rule)
+
+    Args:
+        slide: pptx Slide object.
+        num_label: Section label text (e.g. "核心流程", "架构").
+        title: Slide title text (e.g. "七步学习闭环").
+    """
     add_textbox(slide, 0.85, 0.55, 2.5, 0.35, num_label,
                 font_size=9, color=C_ACCENT, bold=True, font_name=FONT_TITLE)
     add_textbox(slide, 0.85, 0.82, 8, 0.4, title,
@@ -165,7 +259,20 @@ def add_slide_header(slide, num_label, title):
     add_line(slide, 0.85, 1.2, 11.6, 0.008, color=C_BORDER)
 
 def add_tag(slide, left, top, text, bg_color, text_color):
-    """Small colored tag pill"""
+    """Render a small colored tag/badge pill (1.3" × 0.28").
+
+    Used throughout slides to label sections (e.g. "LLM解析", "Kahn算法").
+
+    Args:
+        slide: pptx Slide object.
+        left, top: Position in inches.
+        text: Label text (7pt bold, centered).
+        bg_color: Background fill color.
+        text_color: Text and border color.
+
+    Returns:
+        The pptx Shape object.
+    """
     shape = add_rect(slide, left, top, 1.3, 0.28, fill_color=bg_color, border_color=text_color, border_width=Pt(0.5))
     shape.text_frame.word_wrap = False
     p = shape.text_frame.paragraphs[0]

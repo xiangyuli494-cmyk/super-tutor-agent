@@ -18,6 +18,7 @@ class TestTopologicalSort:
 
     @staticmethod
     def _kp(kp_id: str, prereq_ids: list[str]) -> dict:
+        """Build a minimal KP-like dict for topological sort tests."""
         return {
             "kp_id": kp_id,
             "title": kp_id.upper(),

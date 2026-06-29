@@ -928,6 +928,11 @@ def _do_grade_quiz(
         wrong_attempts = [a for a in attempts if a.is_correct is False]
 
         async def _batch_add_wrong_book():
+            """Batch-persist all wrong attempts to the wrong-question book.
+
+            Returns the count of successfully added entries.
+            Failed entries are logged but do not block the batch.
+            """
             count = 0
             for attempt in wrong_attempts:
                 try:

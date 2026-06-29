@@ -30,6 +30,7 @@ class FakeLLMClient:
     """Test double that returns canned Socratic dialogue responses."""
 
     def __init__(self) -> None:
+        """Initialize the fake LLM with an empty call log."""
         self.calls: list[dict[str, Any]] = []
 
     async def chat(
@@ -39,6 +40,11 @@ class FakeLLMClient:
         max_tokens: int = 4096,
         timeout: int = 120,
     ) -> str:
+        """Return a canned Socratic dialogue response based on message content.
+
+        Detects: start_dialogue → L1_GUIDING, "显示答案" → SHOW_ANSWER,
+        understanding → RESOLVED, default → L2_HINTING escalation.
+        """
         user_message = ""
         for m in messages:
             if m.get("role") == "user":

@@ -24,6 +24,7 @@ class FakeLLMClient:
     """Lightweight test double returning canned JSON responses."""
 
     def __init__(self) -> None:
+        """Initialize the fake LLM with an empty call log."""
         self.calls: list[dict[str, Any]] = []
 
     async def chat(
@@ -33,6 +34,11 @@ class FakeLLMClient:
         max_tokens: int = 4096,
         timeout: int = 120,
     ) -> str:
+        """Return canned JSON based on user message content.
+
+        Routes: quiz generation keyword → questions JSON,
+        grading keyword → results JSON, default → knowledge_points JSON.
+        """
         user_msg = ""
         for m in messages:
             if m.get("role") == "user":
@@ -102,6 +108,10 @@ class FakeLLMClient:
 
 
 def _make_quiz_engine(db: Database, llm: FakeLLMClient) -> QuizEngine:
+    """Factory: create a QuizEngine wired to a test database and fake LLM.
+
+    Also creates the required KnowledgeEngine dependency internally.
+    """
     knowledge = KnowledgeEngine(db=db, llm_client=llm)
     return QuizEngine(db=db, llm_client=llm, knowledge_engine=knowledge)
 
